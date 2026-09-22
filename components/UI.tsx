@@ -1,12 +1,15 @@
 import React from 'react';
 import { Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, radius, spacing, typography } from '../constants/theme';
 import type { Product } from '../services/products/productService';
 import { useAppStore } from '../store/appStore';
 
 export function Screen({ children, scroll = true }: { children: React.ReactNode; scroll?: boolean }) {
+  const insets = useSafeAreaInsets();
   const content = <View style={styles.screen}>{children}</View>;
-  return scroll ? <ScrollView style={styles.root} contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>{content}</ScrollView> : <View style={styles.root}>{content}</View>;
+  const scrollStyle = [styles.scroll, { paddingBottom: 96 + insets.bottom }];
+  return scroll ? <ScrollView style={styles.root} contentContainerStyle={scrollStyle} showsVerticalScrollIndicator={false}>{content}</ScrollView> : <View style={styles.root}>{content}</View>;
 }
 
 export function PageTitle({ title, subtitle }: { title: string; subtitle?: string }) {

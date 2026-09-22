@@ -32,6 +32,9 @@
       "router": {},
       "eas": {
         "projectId": "155012c4-da41-463d-90d9-6be34b520eda"
+      },
+      "cashfree": {
+        "environment": "sandbox"
       }
     }
   }

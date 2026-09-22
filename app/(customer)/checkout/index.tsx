@@ -10,14 +10,27 @@ import { createCustomerMixedCheckout } from '../../../services/orders/mixedCheck
 import { checkProductAvailability, nextWeekSaturday } from '../../../services/orders/customerOrderAvailability';
 import { confirmHarvestShortage } from '../../../services/orders/customerAlerts';
 import { calculateCheckoutDeliveryCharges, type CheckoutDeliveryCharges } from '../../../services/orders/deliveryChargeService';
-import { isPaymentGatewayConfigured } from '../../../services/payments/paymentService';
-import { getProducts } from '../../../services/products/productService';
+import { createCashfreePaymentSession, isPaymentGatewayConfigured, startCashfreePayment } from '../../../services/payments/paymentService';
+import { getCachedProducts, getProducts } from '../../../services/products/productService';
 
 function formatAddress(address: CustomerAddress) {
   return [address.addressLine1, address.addressLine2, address.landmark, address.city, address.state, address.pincode].filter(Boolean).join(', ');
 }
 
 const DELIVERY_SLOTS = ['Saturday morning', 'Saturday evening'] as const;
+const CHECKOUT_VALIDATION_TIMEOUT_MS = 30_000;
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+    });
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 type DeliverySlot = (typeof DELIVERY_SLOTS)[number];
 
 export default function Checkout() {
@@ -32,6 +45,7 @@ export default function Checkout() {
   const [addressError, setAddressError] = useState('');
   const [validationError, setValidationError] = useState('');
   const [placingOrder, setPlacingOrder] = useState(false);
+  const [paymentStage, setPaymentStage] = useState('');
   const [deliveryCharges, setDeliveryCharges] = useState<CheckoutDeliveryCharges | null>(null);
   const [chargeLoading, setChargeLoading] = useState(true);
 
@@ -68,9 +82,8 @@ export default function Checkout() {
     } finally { setChargeLoading(false); }
   }, [addresses, selectedAddressId, cart.length, subscriptionCart]);
 
-  useEffect(() => { void loadAddresses(); }, [loadAddresses]);
+  useFocusEffect(useCallback(() => { void loadAddresses(); }, [loadAddresses]));
   useEffect(() => { void loadDeliveryCharge(); }, [loadDeliveryCharge]);
-  useFocusEffect(useCallback(() => { void loadAddresses(); void loadDeliveryCharge(); }, [loadAddresses, loadDeliveryCharge]));
 
   const selectedAddress = addresses.find((item) => item.id === selectedAddressId);
   const checkoutTotal = totals.subtotal + (deliveryCharges?.total ?? 0);
@@ -87,20 +100,45 @@ export default function Checkout() {
     if (!deliveryCharges) return setValidationError('Delivery charge could not be calculated. Please try again later.');
 
     setPlacingOrder(true);
+    setPaymentStage('Preparing your order…');
+    console.log('[Cashfree][Checkout] Place Order started');
     try {
-      const { products } = await getProducts({ forceRefresh: true });
+      setPaymentStage('Checking product availability…');
+      console.log('[Cashfree][Checkout] refreshing products');
+      let products;
+      try {
+        ({ products } = await withTimeout(
+          getProducts({ forceRefresh: true }),
+          CHECKOUT_VALIDATION_TIMEOUT_MS,
+          'Product availability check is taking too long. Please check your internet connection and try again.',
+        ));
+      } catch (error) {
+        const cachedProducts = getCachedProducts();
+        if (!cachedProducts.length) throw error;
+        console.warn('[Cashfree][Checkout] live product refresh timed out; using cached products for pre-check. Server will revalidate before creating the order.');
+        products = cachedProducts;
+      }
+      console.log('[Cashfree][Checkout] products refreshed');
       const productMap = new Map(products.map((product) => [product.id, product]));
       const shortageCandidates: Array<{ result: Awaited<ReturnType<typeof checkProductAvailability>> }> = [];
       const oneTimeDeliveryDate = nextWeekSaturday();
       for (const item of cart) {
         const product = productMap.get(item.id);
         if (!product || !product.active || !product.oneTimePurchase) throw new Error(`Product "${item.name}" is no longer available for one-time purchase.`);
-        shortageCandidates.push({ result: await checkProductAvailability({ product, quantity: item.quantity, deliveryDate: oneTimeDeliveryDate }) });
+        shortageCandidates.push({ result: await withTimeout(
+          checkProductAvailability({ product, quantity: item.quantity, deliveryDate: oneTimeDeliveryDate }),
+          CHECKOUT_VALIDATION_TIMEOUT_MS,
+          'Product availability check is taking too long. Please check your internet connection and try again.',
+        ) });
       }
       for (const item of subscriptionCart) {
         const product = productMap.get(item.id);
         if (!product || !product.active) throw new Error(`Product "${item.name}" is no longer available.`);
-        shortageCandidates.push({ result: await checkProductAvailability({ product, quantity: item.quantity, deliveryDate: item.startDate || oneTimeDeliveryDate }) });
+        shortageCandidates.push({ result: await withTimeout(
+          checkProductAvailability({ product, quantity: item.quantity, deliveryDate: item.startDate || oneTimeDeliveryDate }),
+          CHECKOUT_VALIDATION_TIMEOUT_MS,
+          'Product availability check is taking too long. Please check your internet connection and try again.',
+        ) });
       }
 
       const shortages = shortageCandidates.filter(({ result }) => result.hasShortage);
@@ -112,9 +150,52 @@ export default function Checkout() {
         shortageDecision = await confirmHarvestShortage({ mode: 'one-time', availableGrams, requestedGrams, shortageGrams });
       }
 
-      const result = await createCustomerMixedCheckout({ mobile, addressId: selectedAddress.id, deliverySlot: selectedSlot, paymentMethod: 'online', oneTimeItems: cart, subscriptionItems: subscriptionCart, shortageDecision });
+      setPaymentStage('Creating your pending order…');
+      console.log('[Cashfree][Checkout] creating pending order(s)');
+      const result = await createCustomerMixedCheckout({
+        mobile,
+        addressId: selectedAddress.id,
+        deliverySlot: selectedSlot,
+        paymentMethod: 'online',
+        oneTimeItems: cart,
+        subscriptionItems: subscriptionCart,
+        shortageDecision,
+      });
+
+      const orderIds = [
+        result.oneTimeOrderId,
+        ...result.subscriptionOrderIds,
+      ].filter(Boolean);
+
+      console.log(`[Cashfree][Checkout] pending order(s) created: ${orderIds.length}`);
+      if (!orderIds.length) throw new Error('Unable to create a pending order for payment. Please try again.');
+      setPaymentStage('Connecting to secure payment…');
+      const paymentSession = await createCashfreePaymentSession(orderIds, mobile);
+      setPaymentStage('Opening Cashfree…');
+      console.log('[Cashfree][Checkout] starting Cashfree checkout');
+      const paymentResult = await startCashfreePayment(paymentSession);
+      setPaymentStage('Verifying payment…');
+      console.log(`[Cashfree][Checkout] payment result: ${paymentResult.status}`);
+
+      if (paymentResult.status !== 'paid') {
+        throw new Error(
+          paymentResult.status === 'pending'
+            ? 'Payment is still pending. Your order has not been marked as paid. Please verify the payment status before trying again.'
+            : paymentResult.message || 'Payment failed. Your order has not been marked as paid.',
+        );
+      }
+
+      console.log('[Cashfree][Checkout] server verified payment as paid; clearing cart');
       useAppStore.getState().clearCart();
-      router.replace({ pathname: '/(customer)/checkout/success', params: { orderId: result.primaryOrderId, orderNumber: result.primaryOrderNumber, total: String(result.total), paymentMethod: 'online' } });
+      router.replace({
+        pathname: '/(customer)/checkout/success',
+        params: {
+          orderId: result.primaryOrderId,
+          orderNumber: result.primaryOrderNumber,
+          total: String(result.total),
+          paymentMethod: 'online',
+        },
+      });
     } catch (error) {
       if (error instanceof Error && error.message === 'HARVEST_SHORTAGE_CONFIRMATION_REQUIRED') {
         setValidationError('Limited harvest is available. Please try placing the order again to review the availability decision.');
@@ -123,6 +204,7 @@ export default function Checkout() {
       }
     } finally {
       setPlacingOrder(false);
+      setPaymentStage('');
     }
   };
 
@@ -164,7 +246,7 @@ export default function Checkout() {
       <Text style={styles.heading}>Payment</Text>
       <View style={styles.card}>
         <Text style={styles.paymentText}>Online payment</Text>
-        {!isPaymentGatewayConfigured() ? <Text style={styles.paymentNotice}>Payment gateway processing is not connected yet. The order is created with payment status Pending.</Text> : null}
+        {!isPaymentGatewayConfigured() ? <Text style={styles.paymentNotice}>You will be securely redirected to Cashfree to complete your payment. Your order is marked pending until Cashfree confirms payment.</Text> : null}
       </View>
 
       <Text style={styles.heading}>Order summary</Text>
@@ -175,9 +257,9 @@ export default function Checkout() {
         {totals.savings > 0 ? <View style={styles.line}><Text style={styles.saving}>You save</Text><Text style={styles.saving}>−₹{totals.savings}</Text></View> : null}
         <View style={styles.line}><Text style={styles.muted}>One-time delivery</Text><Text style={styles.muted}>{chargeLoading ? 'Calculating…' : deliveryCharges?.oneTime.isFree ? '₹0 — FREE' : `₹${deliveryCharges?.oneTime.finalCharge ?? 0}`}</Text></View>
         {deliveryCharges?.subscriptions.map((charge) => <View key={charge.planId} style={styles.line}><Text style={styles.muted}>{charge.planName} delivery</Text><Text style={styles.muted}>{charge.isFree ? '₹0 — FREE' : `₹${charge.finalCharge}`}</Text></View>)}
-        {deliveryCharges?.oneTime.savings > 0 ? <View style={styles.line}><Text style={styles.saving}>You saved on one-time delivery</Text><Text style={styles.saving}>−₹{deliveryCharges.oneTime.savings}</Text></View> : null}
+        {(deliveryCharges?.oneTime.savings ?? 0) > 0 ? <View style={styles.line}><Text style={styles.saving}>You saved on one-time delivery</Text><Text style={styles.saving}>−₹{deliveryCharges?.oneTime.savings ?? 0}</Text></View> : null}
         <View style={[styles.line, { borderBottomWidth: 0 }]}><Text style={styles.totalLabel}>Grand total</Text><Text style={styles.total}>₹{checkoutTotal}</Text></View>
-        {deliveryCharges?.savingsTotal > 0 ? <Text style={styles.saving}>You saved ₹{deliveryCharges.savingsTotal} on delivery</Text> : null}
+        {(deliveryCharges?.savingsTotal ?? 0) > 0 ? <Text style={styles.saving}>You saved ₹{deliveryCharges?.savingsTotal ?? 0} on delivery</Text> : null}
         <Text style={styles.muted}>Delivery uses the active pincode-specific Geolocation Master charge when available; otherwise the matching Delivery Charges Master fallback is used.</Text>
       </View>
 
@@ -185,6 +267,7 @@ export default function Checkout() {
       {deliveryCharges?.subscriptions.map((charge) => charge.sourceName ? <Text key={`source-${charge.planId}`} style={styles.muted}>{charge.planName} delivery source: {charge.sourceName}</Text> : null)}
       {addressError ? <Text style={styles.error}>{addressError}</Text> : null}
       {validationError ? <Text style={styles.error}>{validationError}</Text> : null}
+      {placingOrder && paymentStage ? <View style={styles.progressCard}><ActivityIndicator color={colors.greenDark} /><Text style={styles.progressText}>{paymentStage}</Text></View> : null}
       <View style={{ marginBottom: 18 }}><Button title={placingOrder ? 'Placing Order…' : 'Place Order'} onPress={placingOrder ? () => {} : validateCheckout} /></View>
     </Screen>
   );
@@ -208,4 +291,6 @@ const styles = {
   totalLabel: { fontWeight: '900' as const, color: colors.ink },
   total: { fontWeight: '900' as const, fontSize: 19, color: colors.ink },
   error: { color: colors.danger, fontSize: 13, fontWeight: '700' as const, marginVertical: 6 },
+  progressCard: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: 8, backgroundColor: colors.panel, borderRadius: 10, borderWidth: 1, borderColor: colors.lineSoft, padding: 10, marginBottom: 10 },
+  progressText: { color: colors.inkSoft, fontSize: 13, fontWeight: '700' as const },
 };
