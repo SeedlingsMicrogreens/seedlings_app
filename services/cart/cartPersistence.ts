@@ -18,6 +18,7 @@ export type PersistedCartItem = Product & {
   deliveryChargeMode?: string;
   deliveryCharge?: number;
   startDate?: string;
+  deliveryDate?: string;
 };
 
 function normalizeMobile(mobile: string): string {
@@ -57,23 +58,24 @@ function parseRows(rows: Array<{ cart_key: string; product_id: string; selected_
   const oneTimeItems: CartItem[] = [];
   const subscriptionItems: SubscriptionCartItem[] = [];
 
-  for (const row of rows) {
+  rows.forEach((row, rowIndex) => {
     let parsed: PersistedCartItem;
     try { parsed = JSON.parse(row.product_json) as PersistedCartItem; }
-    catch { continue; }
+    catch { return; }
 
     const quantity = Math.max(1, Math.floor(row.quantity));
     const base = {
       ...parsed,
       quantity,
-      selectedWeight: parsed.defaultWeight || row.selected_weight || 'Pack',
+      selectedWeight: row.selected_weight || parsed.selectedWeight || parsed.defaultWeight || 'Pack',
+      cartPosition: Number.isFinite(Number(parsed.cartPosition)) ? Number(parsed.cartPosition) : rowIndex,
     };
 
     const isSubscription = parsed.purchaseMode === 'subscription' || Boolean(parsed.planId || parsed.subscriptionPlanId);
     if (isSubscription) {
       // A subscription cart entry is valid only when the Website contract fields are present.
-      if (!parsed.planId || !parsed.startDate) continue;
-      subscriptionItems.push({
+      if (parsed.planId && parsed.startDate) {
+        subscriptionItems.push({
         ...base,
         planId: parsed.planId,
         planName: parsed.planName || 'Subscription',
@@ -81,14 +83,19 @@ function parseRows(rows: Array<{ cart_key: string; product_id: string; selected_
         ...(Number.isFinite(Number(parsed.deliveriesPerTerm)) ? { deliveriesPerTerm: Number(parsed.deliveriesPerTerm) } : {}),
         ...(parsed.deliveryChargeMode ? { deliveryChargeMode: parsed.deliveryChargeMode } : {}),
         ...(Number.isFinite(Number(parsed.deliveryCharge)) ? { deliveryCharge: Number(parsed.deliveryCharge) } : {}),
-        startDate: parsed.startDate,
-      });
+          startDate: parsed.startDate,
+          ...(parsed.deliveryDate ? { deliveryDate: parsed.deliveryDate } : {}),
+        });
+      }
     } else {
       oneTimeItems.push(base);
     }
-  }
+  });
 
-  return { oneTimeItems, subscriptionItems };
+  return {
+    oneTimeItems: oneTimeItems.sort((a, b) => (a.cartPosition ?? 0) - (b.cartPosition ?? 0)),
+    subscriptionItems: subscriptionItems.sort((a, b) => (a.cartPosition ?? 0) - (b.cartPosition ?? 0)),
+  };
 }
 
 export function loadUnifiedCart(scope: CartScope): UnifiedCart {

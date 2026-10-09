@@ -1,67 +1,70 @@
-import '../global.css';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { colors } from '../constants/theme';
-import { Text, View } from 'react-native';
 import { useAppStore } from '../store/appStore';
-import { BackNavigationProvider, useBackNavigation } from './backNavigation';
-import { useEffect } from 'react';
+import { BackNavigationProvider, useBackNavigation } from '../components/backNavigation';
+import { Toast } from '../components/UI';
+import { useEffect, useState } from 'react';
+import { reconcilePendingPayment } from '../services/payments/paymentReconciliation';
+import { initializeCustomerPushNotifications } from '../services/notifications/pushNotificationService';
 
 function BackNavigationFeedback() {
   const { toastMessage } = useBackNavigation();
 
   if (!toastMessage) return null;
 
-  return (
-    <View pointerEvents="none" style={styles.toastContainer}>
-      <View style={styles.toast}>
-        <Text style={styles.toastText}>{toastMessage}</Text>
-      </View>
-    </View>
-  );
+  return <Toast message={toastMessage} position="bottom" tone="neutral" />;
 }
 
 export default function RootLayout() {
   const hydrateSession = useAppStore((state) => state.hydrateSession);
+  const authenticated = useAppStore((state) => state.authenticated);
+  const sessionHydrated = useAppStore((state) => state.sessionHydrated);
+  const mobile = useAppStore((state) => state.mobile);
+  const [foregroundToast, setToast] = useState('');
 
   useEffect(() => {
     void hydrateSession();
   }, [hydrateSession]);
+
+  useEffect(() => {
+    if (!authenticated || !sessionHydrated) return;
+    void reconcilePendingPayment();
+  }, [authenticated, sessionHydrated]);
+
+  useEffect(() => {
+    if (!authenticated || !sessionHydrated || !mobile) return;
+    let active = true;
+    let cleanup: (() => void) | undefined;
+    void initializeCustomerPushNotifications(mobile, ({ title, message }) => {
+      if (!active) return;
+      // Foreground FCM messages are not displayed by Android automatically.
+      // The shared root toast keeps the user informed while the notification
+      // record remains the source of truth in the Notifications screen.
+      const cleanTitle = String(title || '').trim();
+      const cleanMessage = String(message || '').trim();
+      // Do not render empty/placeholder notification banners over customer screens.
+      if (!cleanTitle && !cleanMessage) return;
+      const content = [cleanTitle, cleanMessage].filter(Boolean).join(': ');
+      if (!content || content === ':') return;
+      setToast(content);
+    }).then((stop) => { cleanup = stop; }).catch(() => {});
+    return () => { active = false; cleanup?.(); };
+  }, [authenticated, sessionHydrated, mobile]);
+
+
+  useEffect(() => {
+    if (!foregroundToast) return;
+    const timer = setTimeout(() => setToast(''), 4500);
+    return () => clearTimeout(timer);
+  }, [foregroundToast]);
 
   return (
     <BackNavigationProvider>
       <StatusBar style="dark" />
       <Stack screenOptions={{ headerShown:false, contentStyle:{ backgroundColor:colors.paper } }} />
       <BackNavigationFeedback />
+      {foregroundToast ? <Toast message={foregroundToast} position="top" /> : null}
     </BackNavigationProvider>
   );
 }
-
-const styles = {
-  toastContainer: {
-    position: 'absolute' as const,
-    left: 0,
-    right: 0,
-    bottom: 88,
-    alignItems: 'center' as const,
-    zIndex: 9999,
-  },
-  toast: {
-    backgroundColor: '#222',
-    borderRadius: 999,
-    paddingHorizontal: 18,
-    paddingVertical: 11,
-    maxWidth: '88%' as const,
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 5,
-  },
-  toastText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '700' as const,
-    textAlign: 'center' as const,
-  },
-};

@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { logoutCustomer, persistCustomerSession, restoreCustomerSession } from '../services/auth/customerSession';
+import { disableCustomerPushNotifications } from '../services/notifications/pushNotificationService';
+import { getDefaultOneTimeSellingOption } from '../services/products/productService';
 import type { Product } from '../services/products/productService';
 import {
   clearPersistedCart,
@@ -13,7 +15,7 @@ import {
   upsertSubscriptionCartItem,
   type CartScope,
 } from '../services/cart/cartPersistence';
-import type { CartItem, SubscriptionCartItem, UnifiedCart } from '../services/cart/cartService';
+import { replaceProductCartSelectionInCart, type CartItem, type SubscriptionCartItem, type UnifiedCart } from '../services/cart/cartService';
 
 const guestScope: CartScope = { kind: 'guest' };
 
@@ -28,6 +30,18 @@ const scopeFor = (state: Pick<State, 'authenticated' | 'mobile'>): CartScope =>
     ? customerScope(state.mobile)
     : guestScope;
 
+const nextCartPosition = (state: Pick<State, 'cart' | 'subscriptionCart'>) => {
+  const positions = [...state.cart, ...state.subscriptionCart]
+    .map((item) => Number(item.cartPosition))
+    .filter((value) => Number.isFinite(value));
+  return positions.length ? Math.max(...positions) + 1 : 0;
+};
+
+const positionForProduct = (state: Pick<State, 'cart' | 'subscriptionCart'>, productId: string) => {
+  const existing = [...state.cart, ...state.subscriptionCart].find((item) => item.id === productId);
+  return existing?.cartPosition ?? nextCartPosition(state);
+};
+
 type State = {
   mobile: string;
   authenticated: boolean;
@@ -41,13 +55,17 @@ type State = {
   hydrateCart: () => void;
   hydrateSession: () => Promise<void>;
   addToCart: (product: Product, weight?: string) => void;
-  addSubscriptionToCart: (product: Product, plan: { id: string; name?: string; frequency?: string; deliveriesPerTerm?: number; price?: number; deliveryChargeMode?: string; deliveryCharge?: number }, startDate: string, quantity?: number) => void;
+  addSubscriptionToCart: (product: Product, plan: { id: string; name?: string; frequency?: string; deliveriesPerTerm?: number; price?: number; deliveryChargeMode?: string; deliveryCharge?: number; sellingOptionId?: string; sellingOptionLabel?: string; weightGrams?: number }, startDate: string, quantity?: number) => void;
+  setCartPackaging: (productId: string, weightGrams: number, price: number, mrp: number, sellingOptionId?: string, sellingOptionLabel?: string) => void;
+  setSubscriptionCartPackaging: (productId: string, planId: string, startDate: string, weightGrams: number, price: number, sellingOptionId?: string, sellingOptionLabel?: string) => void;
   removeFromCart: (id: string, weight?: string) => void;
   removeSubscriptionFromCart: (productId: string, planId: string, startDate: string) => void;
   changeQuantity: (id: string, delta: number, weight?: string) => void;
   changeSubscriptionQuantity: (productId: string, planId: string, startDate: string, delta: number) => void;
   clearCart: () => void;
   refreshCartProducts: (products: Product[]) => void;
+  replaceProductCartSelection: (input: { product: Product; mode: 'one-time' | 'subscription'; quantity: number; plan?: { id: string; name?: string; frequency?: string; deliveriesPerTerm?: number; price?: number; sellingOptionId?: string; sellingOptionLabel?: string; weightGrams?: number; deliveryChargeMode?: string; deliveryCharge?: number }; startDate?: string }) => void;
+  applyCartDeliveryDates: (dates: Record<string, string | null>) => void;
 };
 
 const applyCart = (set: any, cart: UnifiedCart) => {
@@ -81,6 +99,7 @@ export const useAppStore = create<State>((set, get) => ({
   logout: async () => {
     // Do not delete the customer's persisted cart. It remains scoped to that
     // account and will be restored if the same customer logs in again.
+    try { await disableCustomerPushNotifications(); } catch {}
     try { await logoutCustomer(); }
     finally { set({ mobile: '', authenticated: false, cart: [], subscriptionCart: [], cartHydrated: true }); }
   },
@@ -113,16 +132,30 @@ export const useAppStore = create<State>((set, get) => ({
   },
 
   addToCart: (product, weight) => {
-    const selectedWeight = weight ?? product.defaultWeight;
-    const existing = get().cart.find((item) => item.id === product.id);
+    const defaultOption = getDefaultOneTimeSellingOption(product);
+    const explicitWeightGrams = Number.parseFloat(String(weight ?? '').replace(/[^\d.]/g, ''));
+    const selectedWeightGrams = Number.isFinite(explicitWeightGrams) && explicitWeightGrams > 0
+      ? explicitWeightGrams
+      : ((defaultOption?.weightGrams ?? Number.parseInt(String(product.defaultWeight ?? '').replace(/[^\d.]/g, ''), 10)) || 100);
+    const selectedWeight = selectedWeightGrams >= 1000 && selectedWeightGrams % 1000 === 0 ? `${selectedWeightGrams / 1000}kg` : `${selectedWeightGrams}g`;
+    const selectedOption = (product.sellingOptions ?? []).find((option) => option.active !== false && option.weightGrams === selectedWeightGrams)
+      ?? (Number.isFinite(explicitWeightGrams) && explicitWeightGrams > 0 ? (product.sellingOptions ?? []).find((option) => option.active !== false && Math.abs(option.weightGrams - selectedWeightGrams) < 0.01) : undefined)
+      ?? defaultOption;
     const scope = scopeFor(get());
+    const existing = get().cart.find((item) => item.id === product.id);
     if (existing) {
       const updated = get().cart.map((item) => item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item);
       set({ cart: updated });
       const next = updated.find((item) => item.id === product.id); if (next) upsertCartItem(scope, next);
       return;
     }
-    const item: CartItem = { ...product, quantity: 1, selectedWeight };
+    const item: CartItem = {
+      ...product,
+      quantity: 1,
+      cartPosition: nextCartPosition(get()),
+      selectedWeight,
+      ...(selectedOption ? { price: selectedOption.price, mrp: selectedOption.mrp, sellingOptionId: selectedOption.id, sellingOptionLabel: `${selectedOption.weightGrams >= 1000 && selectedOption.weightGrams % 1000 === 0 ? `${selectedOption.weightGrams / 1000}kg` : `${selectedOption.weightGrams}g`} box` } : {}),
+    };
     set((state) => ({ cart: [...state.cart, item] })); upsertCartItem(scope, item);
   },
 
@@ -138,8 +171,27 @@ export const useAppStore = create<State>((set, get) => ({
       return;
     }
     const subscriptionPrice = Number(plan.price ?? product.price ?? 0);
-    const item: SubscriptionCartItem = { ...product, quantity: normalizedQuantity, selectedWeight: product.defaultWeight, price: subscriptionPrice, mrp: subscriptionPrice, planId, planName: plan.name || 'Subscription', ...(plan.frequency ? { frequency: plan.frequency } : {}), ...(Number.isFinite(Number(plan.deliveriesPerTerm)) ? { deliveriesPerTerm: Number(plan.deliveriesPerTerm) } : {}), ...(plan.deliveryChargeMode ? { deliveryChargeMode: plan.deliveryChargeMode } : {}), ...(Number.isFinite(Number(plan.deliveryCharge)) ? { deliveryCharge: Number(plan.deliveryCharge) } : {}), startDate };
+    const selectedWeight = Number(plan.weightGrams) > 0
+      ? (Number(plan.weightGrams) >= 1000 && Number(plan.weightGrams) % 1000 === 0 ? `${Number(plan.weightGrams) / 1000}kg` : `${Number(plan.weightGrams)}g`)
+      : product.defaultWeight;
+    const item: SubscriptionCartItem = { ...product, quantity: normalizedQuantity, cartPosition: nextCartPosition(get()), selectedWeight, price: subscriptionPrice, mrp: subscriptionPrice, planId, planName: plan.name || 'Subscription', ...(plan.sellingOptionId ? { sellingOptionId: plan.sellingOptionId } : {}), ...(plan.sellingOptionLabel ? { sellingOptionLabel: plan.sellingOptionLabel } : {}), ...(plan.frequency ? { frequency: plan.frequency } : {}), ...(Number.isFinite(Number(plan.deliveriesPerTerm)) ? { deliveriesPerTerm: Number(plan.deliveriesPerTerm) } : {}), ...(plan.deliveryChargeMode ? { deliveryChargeMode: plan.deliveryChargeMode } : {}), ...(Number.isFinite(Number(plan.deliveryCharge)) ? { deliveryCharge: Number(plan.deliveryCharge) } : {}), startDate };
     set((state) => ({ subscriptionCart: [...state.subscriptionCart, item] })); upsertSubscriptionCartItem(scope, item);
+  },
+
+  setCartPackaging: (productId, weightGrams, price, mrp, sellingOptionId, sellingOptionLabel) => {
+    const scope = scopeFor(get());
+    const updated = get().cart.map((item) => item.id === productId ? { ...item, selectedWeight: weightGrams >= 1000 && weightGrams % 1000 === 0 ? `${weightGrams / 1000}kg` : `${weightGrams}g`, price, mrp, ...(sellingOptionId ? { sellingOptionId } : {}), ...(sellingOptionLabel ? { sellingOptionLabel } : {}) } : item);
+    set({ cart: updated });
+    const next = updated.find((item) => item.id === productId);
+    if (next) upsertCartItem(scope, next);
+  },
+
+  setSubscriptionCartPackaging: (productId, planId, startDate, weightGrams, price, sellingOptionId, sellingOptionLabel) => {
+    const scope = scopeFor(get());
+    const updated = get().subscriptionCart.map((item) => item.id === productId && item.planId === planId && item.startDate === startDate ? { ...item, selectedWeight: weightGrams >= 1000 && weightGrams % 1000 === 0 ? `${weightGrams / 1000}kg` : `${weightGrams}g`, price, mrp: price, ...(sellingOptionId ? { sellingOptionId } : {}), ...(sellingOptionLabel ? { sellingOptionLabel } : {}) } : item);
+    set({ subscriptionCart: updated });
+    const next = updated.find((item) => item.id === productId && item.planId === planId && item.startDate === startDate);
+    if (next) upsertSubscriptionCartItem(scope, next);
   },
 
   removeFromCart: (id) => { const scope = scopeFor(get()); set((state) => ({ cart: state.cart.filter((item) => item.id !== id) })); removeCartItem(scope, id); },
@@ -161,10 +213,53 @@ export const useAppStore = create<State>((set, get) => ({
 
   clearCart: () => { clearPersistedCart(scopeFor(get())); set({ cart: [], subscriptionCart: [] }); },
 
+  replaceProductCartSelection: (input) => {
+    const state = get();
+    const scope = scopeFor(state);
+    const unified = replaceProductCartSelectionInCart({
+      ...input,
+      oneTimeItems: state.cart,
+      subscriptionItems: state.subscriptionCart,
+    });
+    set({ cart: unified.oneTimeItems, subscriptionCart: unified.subscriptionItems });
+    replaceUnifiedCart(scope, unified);
+  },
+
+  applyCartDeliveryDates: (dates) => {
+    const scope = scopeFor(get());
+    const oneTime = get().cart.map((item) => {
+      const key = `one-time:${item.id}`;
+      const deliveryDate = dates[key] ?? item.deliveryDate;
+      return deliveryDate ? { ...item, deliveryDate } : item;
+    });
+    const subscriptions = get().subscriptionCart.map((item) => {
+      const key = `subscription:${item.id}:${item.planId}:${item.startDate}`;
+      const deliveryDate = dates[key] ?? item.deliveryDate;
+      return deliveryDate ? { ...item, deliveryDate } : item;
+    });
+    const unified = { oneTimeItems: oneTime, subscriptionItems: subscriptions };
+    set({ cart: oneTime, subscriptionCart: subscriptions });
+    replaceUnifiedCart(scope, unified);
+  },
+
   refreshCartProducts: (products) => {
     const byId = new Map(products.map((product) => [product.id, product]));
-    const oneTime = get().cart.map((item) => { const product = byId.get(item.id); return product ? { ...product, quantity: item.quantity, selectedWeight: product.defaultWeight } : item; });
-    const subscriptions = get().subscriptionCart.map((item) => { const product = byId.get(item.id); return product ? { ...product, quantity: item.quantity, selectedWeight: product.defaultWeight, price: item.price, mrp: item.mrp, currency: item.currency, imageUrl: item.imageUrl, planId: item.planId, planName: item.planName, ...(item.frequency ? { frequency: item.frequency } : {}), ...(item.deliveriesPerTerm !== undefined ? { deliveriesPerTerm: item.deliveriesPerTerm } : {}), ...(item.deliveryChargeMode ? { deliveryChargeMode: item.deliveryChargeMode } : {}), ...(item.deliveryCharge !== undefined ? { deliveryCharge: item.deliveryCharge } : {}), startDate: item.startDate } : item; });
+    const oneTime = get().cart.map((item) => {
+      const product = byId.get(item.id);
+      return product ? {
+        ...product,
+        quantity: item.quantity,
+        cartPosition: item.cartPosition,
+        selectedWeight: item.selectedWeight,
+        price: item.price,
+        mrp: item.mrp,
+        currency: item.currency,
+        imageUrl: item.imageUrl,
+        ...(item.sellingOptionId ? { sellingOptionId: item.sellingOptionId } : {}),
+        ...(item.sellingOptionLabel ? { sellingOptionLabel: item.sellingOptionLabel } : {}),
+      } : item;
+    });
+    const subscriptions = get().subscriptionCart.map((item) => { const product = byId.get(item.id); return product ? { ...product, quantity: item.quantity, cartPosition: item.cartPosition, selectedWeight: item.selectedWeight, price: item.price, mrp: item.mrp, currency: item.currency, imageUrl: item.imageUrl, planId: item.planId, planName: item.planName, ...(item.frequency ? { frequency: item.frequency } : {}), ...(item.deliveriesPerTerm !== undefined ? { deliveriesPerTerm: item.deliveriesPerTerm } : {}), ...(item.deliveryChargeMode ? { deliveryChargeMode: item.deliveryChargeMode } : {}), ...(item.deliveryCharge !== undefined ? { deliveryCharge: item.deliveryCharge } : {}), startDate: item.startDate } : item; });
     const unified = { oneTimeItems: oneTime, subscriptionItems: subscriptions };
     set({ cart: oneTime, subscriptionCart: subscriptions });
     replaceUnifiedCart(scopeFor(get()), unified);

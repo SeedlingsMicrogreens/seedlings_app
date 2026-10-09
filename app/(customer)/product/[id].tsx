@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Image, Modal, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
-import { router, useLocalSearchParams } from 'expo-router';
-import { Button } from '../../../components/UI';
+import { Image, StyleSheet, Text, View } from 'react-native';
+import { useLocalSearchParams } from 'expo-router';
+import { AppCard, Button, EmptyState, LoadingState, OptionCard, QuantityStepper, Screen, SelectField, SelectSheet } from '../../../components/UI';
 import { colors, radius, spacing, typography } from '../../../constants/theme';
-import { getProducts, refreshProducts, type Product } from '../../../services/products/productService';
-import { getActiveSubscriptionPlans, type SubscriptionPlan } from '../../../services/subscriptions/subscriptionService';
+import { getDefaultOneTimeSellingOption, getProducts, type Product, type ProductSellingOption } from '../../../services/products/productService';
+import { isProductSubscriptionEligible } from '../../../services/products/subscriptionEligibility';
+import { getActiveSubscriptionPlans, getSubscriptionPlanPriceForSellingOption, type SubscriptionPlan } from '../../../services/subscriptions/subscriptionService';
 import { useAppStore } from '../../../store/appStore';
 
 const money = (value: number, currency = 'INR') => {
@@ -43,12 +44,21 @@ export default function ProductDetail() {
   const [products, setProducts] = useState<Product[]>([]);
   const [plans, setPlans] = useState<SubscriptionPlan[]>([]);
   const [loading, setLoading] = useState(true);
-  const [sheetOpen, setSheetOpen] = useState(false);
   const [planId, setPlanId] = useState('');
-  const [subscriptionQuantity, setSubscriptionQuantity] = useState(1);
-  const [startDate, setStartDate] = useState(nextWeekSaturday());
+  const [selectedSellingOptionId, setSelectedSellingOptionId] = useState('');
+  const [packagingOpen, setPackagingOpen] = useState(false);
+  const [startDateOpen, setStartDateOpen] = useState(false);
+  const [subscriptionStartDate, setSubscriptionStartDate] = useState(nextWeekSaturday());
   const addToCart = useAppStore((s) => s.addToCart);
   const addSubscriptionToCart = useAppStore((s) => s.addSubscriptionToCart);
+  const cart = useAppStore((s) => s.cart);
+  const subscriptionCart = useAppStore((s) => s.subscriptionCart);
+  const changeQuantity = useAppStore((s) => s.changeQuantity);
+  const changeSubscriptionQuantity = useAppStore((s) => s.changeSubscriptionQuantity);
+  const removeFromCart = useAppStore((s) => s.removeFromCart);
+  const removeSubscriptionFromCart = useAppStore((s) => s.removeSubscriptionFromCart);
+  const setCartPackaging = useAppStore((s) => s.setCartPackaging);
+  const setSubscriptionCartPackaging = useAppStore((s) => s.setSubscriptionCartPackaging);
 
   useEffect(() => {
     let alive = true;
@@ -57,11 +67,10 @@ export default function ProductDetail() {
         const result = await getProducts();
         if (!alive) return;
         setProducts(result.products);
-        void refreshProducts().then((fresh) => { if (alive) setProducts(fresh); }).catch(() => {});
         const product = result.products.find((item) => item.id === id);
         if (product?.active) {
           try {
-            const activePlans = await getActiveSubscriptionPlans();
+            const activePlans = await getActiveSubscriptionPlans(product.id);
             if (!alive) return;
             setPlans(activePlans.filter((plan) => plan.active === true && Number(plan.price ?? 0) >= 0));
           } catch {
@@ -76,207 +85,212 @@ export default function ProductDetail() {
   }, [id]);
 
   const product = useMemo(() => products.find((item) => item.id === id), [products, id]);
-  const canSubscribe = Boolean(product?.active && plans.length > 0);
-  const canBuyOneTime = Boolean(product?.oneTimePurchase);
+  const defaultSellingOption = product ? getDefaultOneTimeSellingOption(product) : undefined;
+  const selectedSellingOption: ProductSellingOption | undefined = product?.sellingOptions?.find((option) => option.id === selectedSellingOptionId && option.active !== false) || defaultSellingOption;
+  const canSubscribe = Boolean(product && isProductSubscriptionEligible(product) && plans.length > 0);
+  const canBuyOneTime = Boolean(product?.oneTimePurchase && selectedSellingOption);
+  const nextSaturday = nextWeekSaturday();
+  const oneTimeCartItem = product ? cart.find((item) => item.id === product.id) : undefined;
+  const selectedSubscriptionCartItem = product && planId
+    ? subscriptionCart.find((item) => item.id === product.id && item.planId === planId && item.startDate === subscriptionStartDate)
+    : undefined;
+  const quantity = planId ? (selectedSubscriptionCartItem?.quantity ?? 0) : (oneTimeCartItem?.quantity ?? 0);
+  const selectedPlan = planId ? plans.find((plan) => plan.id === planId) : undefined;
+  const selectedSubscriptionPrice = selectedPlan ? getSubscriptionPlanPriceForSellingOption(selectedPlan, selectedSellingOption?.id) : 0;
 
-  if (loading) return <View style={styles.center}><ActivityIndicator color={colors.greenDark} /></View>;
-  if (!product) return <View style={styles.screen}><Text style={styles.muted}>Product not found.</Text></View>;
+  useEffect(() => {
+    if (product && !product.oneTimePurchase && plans.length > 0 && !planId) {
+      setPlanId(plans[0].id);
+    }
+  }, [product, plans, planId]);
+
+  if (loading) return <Screen><LoadingState label="Loading product…" /></Screen>;
+  if (!product) return <Screen><EmptyState title="Product not found." /></Screen>;
 
   const imageSource = product.imageUrl?.startsWith('http') ? { uri: product.imageUrl } : require('../../../assets/products/placeholder.png');
-  const saving = Math.max(0, (product.mrp ?? product.price) - product.price);
   const shortDescription = richTextToNativeText(product.shortDescription);
   const description = richTextToNativeText(product.description) || 'Freshly grown microgreens, harvested with care and prepared for delivery.';
 
+  const formatOptionWeight = (grams: number) => grams >= 1000 && grams % 1000 === 0 ? `${grams / 1000}kg` : `${grams}g`;
+
   const add = () => {
-    if (!canBuyOneTime) return;
-    addToCart(product, product.defaultWeight);
-    for (let i = 1; i < quantity; i += 1) addToCart(product, product.defaultWeight);
-    router.push('/(customer)/(tabs)/cart');
+    if (!canBuyOneTime || !selectedSellingOption) return;
+    addToCart(product, formatOptionWeight(selectedSellingOption.weightGrams));
   };
 
   const subscribe = () => {
-    if (!canSubscribe || !planId) return;
-    const plan = plans.find((item) => item.id === planId);
-    if (!plan) return;
+    if (!canSubscribe || !selectedPlan || !selectedSellingOption || !subscriptionStartDate) return;
     addSubscriptionToCart(product, {
-      id: plan.id,
-      name: plan.name,
-      frequency: plan.frequency,
-      deliveriesPerTerm: plan.deliveriesPerTerm,
-    }, startDate, subscriptionQuantity);
-    setSheetOpen(false);
-    router.push('/(customer)/(tabs)/cart');
+      id: selectedPlan.id,
+      name: selectedPlan.name,
+      frequency: selectedPlan.frequency,
+      deliveriesPerTerm: selectedPlan.deliveriesPerTerm,
+      price: selectedSubscriptionPrice,
+      sellingOptionId: selectedSellingOption.id,
+      sellingOptionLabel: formatOptionWeight(selectedSellingOption.weightGrams),
+      weightGrams: selectedSellingOption.weightGrams,
+    }, subscriptionStartDate, 1);
   };
 
-  const quantity = subscriptionQuantity;
+  const selectPlan = (nextPlanId: string) => {
+    setPlanId(nextPlanId);
+  };
+
+  const decrease = () => {
+    if (quantity <= 0) return;
+    if (planId) {
+      if (quantity === 1) removeSubscriptionFromCart(product.id, planId, subscriptionStartDate);
+      else changeSubscriptionQuantity(product.id, planId, subscriptionStartDate, -1);
+    } else {
+      if (quantity === 1) removeFromCart(product.id);
+      else changeQuantity(product.id, -1);
+    }
+  };
+
+  const increase = () => {
+    if (quantity <= 0) {
+      if (planId) subscribe(); else add();
+      return;
+    }
+    if (planId) changeSubscriptionQuantity(product.id, planId, subscriptionStartDate, 1);
+    else changeQuantity(product.id, 1);
+  };
+
+  const packagingOptions = (product.sellingOptions ?? []).filter((option) => option.active !== false && option.weightGrams > 0).sort((a, b) => a.weightGrams - b.weightGrams);
+  const selectPackaging = (option: ProductSellingOption) => {
+    setSelectedSellingOptionId(option.id);
+    if (oneTimeCartItem && !planId) {
+      setCartPackaging(product.id, option.weightGrams, option.price, option.mrp, option.id, formatOptionWeight(option.weightGrams));
+    }
+    if (selectedSubscriptionCartItem && planId) {
+      const activePlan = plans.find((item) => item.id === planId);
+      const planOption = activePlan?.sellingOptions?.find((item) => String(item.sellingOptionId ?? item.id ?? '') === String(option.id));
+      if (planOption) {
+        setSubscriptionCartPackaging(product.id, planId, subscriptionStartDate, option.weightGrams, Number(planOption.planPrice ?? activePlan?.price ?? 0), String(planOption.sellingOptionId ?? planOption.id ?? option.id), formatOptionWeight(option.weightGrams));
+      }
+    }
+    setPackagingOpen(false);
+  };
+  const startDateOptions = Array.from({ length: 8 }, (_, index) => {
+    const base = new Date();
+    const day = base.getDay();
+    const daysUntilSaturday = day === 6 ? 7 : (6 - day + 7) % 7;
+    base.setDate(base.getDate() + (daysUntilSaturday || 7) + index * 7);
+    return base.toISOString().slice(0, 10);
+  });
+  const hasOneTimeDiscount = Boolean(selectedSellingOption && selectedSellingOption.mrp > selectedSellingOption.price);
 
   return (
-    <View style={styles.root}>
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
-        <View style={styles.screen}>
-          <Image source={imageSource} style={styles.productImage} resizeMode="contain" />
-          <Text style={styles.tag}>{product.type === 'multiple' ? 'Salable combo' : 'Fresh microgreen'}</Text>
-          <Text style={styles.title}>{product.name}</Text>
-          <Text style={styles.rating}>{product.popular ? 'Featured · Fresh availability' : 'Fresh availability'}</Text>
+    <Screen>
+      <Image source={imageSource} style={styles.productImage} resizeMode="contain" accessibilityLabel={product.name} />
+      <Text style={styles.tag}>{product.type === 'multiple' ? 'Salable combo' : 'Fresh microgreen'}</Text>
+      <Text style={styles.title}>{product.name}</Text>
+      <Text style={styles.rating}>{product.popular ? 'Featured · Fresh availability' : 'Fresh availability'}</Text>
 
-          {shortDescription ? <Text style={styles.shortDescription}>{shortDescription}</Text> : null}
+      {shortDescription ? <Text style={styles.shortDescription}>{shortDescription}</Text> : null}
 
-          <View style={styles.priceRow}>
-            <Text style={styles.price}>{money(product.price, product.currency)}</Text>
-            {product.mrp && product.mrp > product.price ? <Text style={styles.mrp}>{money(product.mrp, product.currency)}</Text> : null}
-            {saving > 0 ? <Text style={styles.saving}>Save {money(saving, product.currency)}</Text> : null}
-          </View>
+      <View style={styles.purchaseSection}>
+        <SelectField label="Packaging" value={formatOptionWeight(selectedSellingOption?.weightGrams ?? 0)} onPress={() => setPackagingOpen(true)} accessibilityLabel="Choose packaging" />
 
-          {canBuyOneTime ? <View style={styles.oneTimeContent}>
-            <Text style={styles.purchaseHeading}>One-time purchase</Text>
-            <Button title={`Add to Cart — ${money(product.price, product.currency)}`} onPress={add} />
-          </View> : null}
+        <View style={styles.optionList}>
+          {canBuyOneTime ? <OptionCard
+            title="One-time purchase"
+            subtitle="Buy once"
+            selected={!planId}
+            onPress={() => setPlanId('')}
+            trailing={<View style={styles.purchasePriceBlock}>
+              <Text style={styles.purchasePrice}>{money(selectedSellingOption?.price ?? 0, product.currency)}</Text>
+              {hasOneTimeDiscount && selectedSellingOption ? <Text style={styles.purchaseMrp}>{money(selectedSellingOption.mrp, product.currency)}</Text> : null}
+            </View>}
+          /> : null}
 
-          <View style={styles.infoCard}>
-            <Text style={styles.infoLabel}>Availability</Text>
-            <Text style={styles.muted}>Availability is confirmed when you place the order.</Text>
-            <Text style={[styles.infoLabel, { marginTop: 12 }]}>Purchase</Text>
-            <Text style={styles.muted}>{canBuyOneTime ? 'One-time purchase available.' : 'Purchase unavailable.'}</Text>
-            <Text style={[styles.infoLabel, { marginTop: 12 }]}>Delivery</Text>
-            <Text style={styles.muted}>Weekend delivery slots.</Text>
-          </View>
-
-          <View style={styles.descriptionCard}>
-            <Text style={styles.sectionTitle}>Product description</Text>
-            <Text style={styles.description}>{description}</Text>
-          </View>
-
-          <View style={{ height: canSubscribe ? 150 : 100 }} />
+          {canSubscribe ? plans.map((plan) => <OptionCard
+            key={plan.id}
+            title={plan.name}
+            subtitle={Number(plan.deliveriesPerTerm ?? 0) > 0 ? `${Number(plan.deliveriesPerTerm)} deliveries / term` : 'Automatic deliveries'}
+            selected={planId === plan.id}
+            onPress={() => selectPlan(plan.id)}
+            trailing={money(getSubscriptionPlanPriceForSellingOption(plan, selectedSellingOption?.id), product.currency)}
+          />) : null}
         </View>
-      </ScrollView>
 
-      {canSubscribe ? <View style={styles.fixedActions}>
-        <Pressable onPress={() => setSheetOpen(true)} style={styles.subscribeCta}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.subscribeTitle}>Subscribe</Text>
-            <Text style={styles.subscribeSubtitle}>Set it once and enjoy automatic deliveries</Text>
+        {canSubscribe && planId ? (
+          <View style={styles.startDateSection}>
+            <SelectField label="Start date" value={subscriptionStartDate} onPress={() => setStartDateOpen(true)} accessibilityLabel="Choose subscription start date" />
+            <Text style={styles.startDateHint}>Choose a Saturday for your first delivery.</Text>
           </View>
-          <Text style={styles.subscribeArrow}>›</Text>
-        </Pressable>
-      </View> : null}
+        ) : null}
 
-      <Modal visible={sheetOpen} transparent animationType="slide" onRequestClose={() => setSheetOpen(false)}>
-        <View style={styles.modalBackdrop}>
-          <Pressable style={styles.modalDismiss} onPress={() => setSheetOpen(false)} />
-          <View style={styles.sheet}>
-            <View style={styles.handle} />
-            <View style={styles.sheetHead}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.eyebrow}>Subscribe</Text>
-                <Text style={styles.sheetTitle}>{product.name}</Text>
-                <Text style={styles.muted}>Set it once and enjoy automatic deliveries.</Text>
-              </View>
-              <Pressable onPress={() => setSheetOpen(false)} hitSlop={10}><Text style={styles.close}>×</Text></Pressable>
-            </View>
-
-            <View style={styles.subscribeProductCard}>
-              <Image source={imageSource} style={styles.thumb} resizeMode="contain" />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.bold}>{product.name}</Text>
-                <Text style={styles.muted}>{product.type === 'multiple' ? 'Combo' : 'Fresh microgreen'}</Text>
-              </View>
-              <Text style={styles.planPrice}>{money(product.price, product.currency)}</Text>
-            </View>
-
-            <ScrollView
-              style={styles.sheetScroll}
-              contentContainerStyle={styles.sheetScrollContent}
-              showsVerticalScrollIndicator={false}
-              keyboardShouldPersistTaps="handled"
-            >
-              <Text style={styles.stepTitle}>1 · Select plan</Text>
-              {plans.map((plan) => (
-                <Pressable key={plan.id} onPress={() => setPlanId(plan.id)} style={[styles.plan, planId === plan.id && styles.planSelected]}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.bold}>{plan.name}</Text>
-                    <Text style={styles.muted}>{money(Number(plan.price ?? 0), product.currency)} / term</Text>
-                    <Text style={styles.planMeta}>{Number(plan.deliveriesPerTerm ?? 0) > 0 ? `${Number(plan.deliveriesPerTerm)} deliveries / term` : 'Ongoing deliveries'} · {plan.deliveryChargeMode === 'per_delivery' && Number(plan.deliveryCharge ?? 0) > 0 ? `+ ${money(Number(plan.deliveryCharge), product.currency)} / delivery` : 'Delivery included'}</Text>
-                  </View>
-                  {planId === plan.id ? <Text style={styles.selected}>Selected</Text> : null}
-                </Pressable>
-              ))}
-
-              <Text style={styles.stepTitle}>2 · Quantity</Text>
-              <View style={styles.quantityControl}>
-                <Pressable onPress={() => setSubscriptionQuantity((value) => Math.max(1, value - 1))} style={styles.quantityButton}><Text style={styles.quantityText}>−</Text></Pressable>
-                <Text style={styles.quantityValue}>{subscriptionQuantity}</Text>
-                <Pressable onPress={() => setSubscriptionQuantity((value) => value + 1)} style={styles.quantityButton}><Text style={styles.quantityText}>+</Text></Pressable>
-              </View>
-
-              <Text style={styles.stepTitle}>3 · Start date</Text>
-              <View style={styles.dateBox}><TextInput value={startDate} onChangeText={setStartDate} placeholder="YYYY-MM-DD" autoCapitalize="none" style={styles.dateInput} /><Text style={styles.muted}>Saturday delivery</Text></View>
-
-              <View style={styles.benefit}><Text style={styles.bold}>Delivery included</Text><Text style={styles.muted}>Delivery address will be selected on the subscription screen.</Text></View>
-            </ScrollView>
-
-            <View style={styles.sheetFooter}>
-              <Button title={planId ? 'Subscribe' : 'Select a subscription'} onPress={subscribe} disabled={!planId} />
-            </View>
+        {quantity > 0 ? (
+          <View style={styles.cartActionRow}>
+            <QuantityStepper quantity={quantity} onDecrease={decrease} onIncrease={increase} itemLabel={product.name} />
+            <Text style={styles.selectedTotal}>{money((planId ? selectedSubscriptionPrice : (selectedSellingOption?.price ?? 0)) * quantity, product.currency)}{planId ? ' / term' : ''}</Text>
           </View>
-        </View>
-      </Modal>
-    </View>
+        ) : (
+          <View style={styles.addAction}>
+            <Button
+              title={planId ? `Add to Cart — ${money(selectedSubscriptionPrice, product.currency)}` : canBuyOneTime && selectedSellingOption ? `Add to Cart — ${money(selectedSellingOption.price, product.currency)}` : 'Purchase unavailable'}
+              onPress={planId ? subscribe : add}
+              disabled={planId ? !canSubscribe : (!canBuyOneTime || !selectedSellingOption)}
+            />
+          </View>
+        )}
+      </View>
+
+      <SelectSheet
+        visible={startDateOpen}
+        onClose={() => setStartDateOpen(false)}
+        title="Subscription start date"
+        options={startDateOptions.map((date) => ({ key: date, label: date, selected: subscriptionStartDate === date }))}
+        onSelect={(date) => { setSubscriptionStartDate(date); setStartDateOpen(false); }}
+      />
+
+      <SelectSheet
+        visible={packagingOpen}
+        onClose={() => setPackagingOpen(false)}
+        title="Packaging"
+        options={packagingOptions.map((option) => ({ key: option.id, label: formatOptionWeight(option.weightGrams), detail: money(option.price, product.currency), selected: selectedSellingOption?.id === option.id }))}
+        onSelect={(id) => { const option = packagingOptions.find((item) => item.id === id); if (option) selectPackaging(option); }}
+      />
+
+      <View style={styles.infoCard}>
+        <Text style={styles.infoLabel}>Availability</Text>
+        <Text style={styles.muted}>Availability is confirmed when you place the order.</Text>
+        <Text style={[styles.infoLabel, styles.infoLabelSpaced]}>Purchase</Text>
+        <Text style={styles.muted}>{canBuyOneTime ? 'One-time purchase available.' : 'Purchase unavailable.'}</Text>
+        <Text style={[styles.infoLabel, styles.infoLabelSpaced]}>Delivery</Text>
+        <Text style={styles.muted}>Weekend delivery slots.</Text>
+      </View>
+
+      <AppCard style={styles.descriptionCard}>
+        <Text style={styles.sectionTitle}>Product description</Text>
+        <Text style={styles.description}>{description}</Text>
+      </AppCard>
+    </Screen>
   );
 }
 
-const styles = {
-  root: { flex: 1, backgroundColor: colors.paper },
-  center: { flex: 1, backgroundColor: colors.paper, alignItems: 'center' as const, justifyContent: 'center' as const },
-  screen: { paddingHorizontal: spacing.lg, paddingTop: spacing.sm },
-  scroll: { paddingBottom: 12 },
-  productImage: { width: '100%' as const, height: 250, backgroundColor: colors.block, borderRadius: radius.xl },
-  tag: { color: colors.greenDark, fontSize: typography.caption, fontWeight: '900' as const, marginTop: spacing.lg, textTransform: 'uppercase' as const },
-  title: { fontSize: 25, lineHeight: 30, fontWeight: '900' as const, color: colors.ink, marginTop: 6 },
+const styles = StyleSheet.create({
+  productImage: { width: '100%', height: 250, backgroundColor: colors.block, borderRadius: radius.xl },
+  tag: { color: colors.greenDark, fontSize: typography.caption, fontWeight: '900', marginTop: spacing.lg, textTransform: 'uppercase' },
+  title: { fontSize: 25, lineHeight: 30, fontWeight: '900', color: colors.ink, marginTop: 6 },
   rating: { color: colors.inkSoft, fontSize: 12, marginTop: 4 },
-  shortDescription: { color: colors.inkSoft, fontSize: 14, lineHeight: 21, marginTop: 12 },
-  priceRow: { flexDirection: 'row' as const, alignItems: 'baseline' as const, gap: 8, flexWrap: 'wrap' as const, marginTop: 12 },
-  price: { fontSize: 23, fontWeight: '900' as const, color: colors.ink },
-  mrp: { color: colors.inkFaint, textDecorationLine: 'line-through' as const },
-  saving: { color: colors.greenDark, fontWeight: '800' as const },
-  infoCard: { backgroundColor: colors.greenTint, borderRadius: 14, padding: 14, marginTop: 18 },
-  infoLabel: { color: colors.ink, fontWeight: '900' as const },
+  shortDescription: { color: colors.inkSoft, fontSize: 14, lineHeight: 21, marginTop: spacing.md },
+  purchaseSection: { marginTop: 18 },
+  optionList: { marginTop: spacing.md, gap: spacing.sm },
+  purchasePriceBlock: { alignItems: 'flex-end' },
+  purchasePrice: { color: colors.greenDark, fontSize: 14, fontWeight: '900' },
+  purchaseMrp: { color: colors.inkFaint, textDecorationLine: 'line-through', fontSize: 10, marginTop: 2 },
+  startDateSection: { marginTop: spacing.md },
+  startDateHint: { color: colors.inkSoft, fontSize: 12, marginTop: 5 },
+  cartActionRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: spacing.md },
+  selectedTotal: { color: colors.greenDark, fontSize: 16, fontWeight: '900' },
+  addAction: { marginTop: spacing.md },
+  infoCard: { backgroundColor: colors.greenTint, borderRadius: radius.xl, padding: 14, marginTop: 18 },
+  infoLabel: { color: colors.ink, fontWeight: '900' },
+  infoLabelSpaced: { marginTop: spacing.md },
   muted: { color: colors.inkSoft, marginTop: 3, lineHeight: 19 },
-  descriptionCard: { backgroundColor: colors.panel, borderRadius: 14, borderWidth: 1, borderColor: colors.lineSoft, padding: 15, marginTop: 16 },
-  sectionTitle: { fontSize: 17, fontWeight: '900' as const, color: colors.ink },
+  descriptionCard: { marginTop: spacing.lg, marginBottom: 0 },
+  sectionTitle: { fontSize: 17, fontWeight: '900', color: colors.ink },
   description: { color: colors.inkSoft, lineHeight: 21, marginTop: 7 },
-  fixedActions: { position: 'absolute' as const, left: 0, right: 0, bottom: 0, backgroundColor: colors.paper, borderTopWidth: 1, borderTopColor: colors.lineSoft, paddingHorizontal: spacing.lg, paddingTop: 10, paddingBottom: 12 },
-  oneTimeContent: { marginTop: 18 },
-  purchaseHeading: { fontSize: 12, fontWeight: '900' as const, color: colors.ink, marginBottom: 6 },
-  subscribeCta: { minHeight: 60, borderRadius: 14, backgroundColor: colors.orange, flexDirection: 'row' as const, alignItems: 'center' as const, paddingHorizontal: 15 },
-  subscribeTitle: { color: colors.white, fontSize: 16, fontWeight: '900' as const },
-  subscribeSubtitle: { color: colors.white, fontSize: 11, marginTop: 2 },
-  subscribeArrow: { color: colors.white, fontSize: 30, fontWeight: '300' as const, marginLeft: 10 },
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.42)', justifyContent: 'flex-end' as const },
-  modalDismiss: { flex: 1 },
-  sheet: { backgroundColor: colors.paper, borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: spacing.lg, maxHeight: '90%' as const },
-  sheetScroll: { flexShrink: 1, minHeight: 0 },
-  sheetScrollContent: { paddingBottom: 4 },
-  sheetFooter: { paddingTop: 10, backgroundColor: colors.paper },
-  handle: { width: 42, height: 4, borderRadius: 4, backgroundColor: colors.line, alignSelf: 'center' as const, marginBottom: 12 },
-  sheetHead: { flexDirection: 'row' as const, alignItems: 'flex-start' as const },
-  eyebrow: { color: colors.orangeDark, fontSize: 11, fontWeight: '900' as const, textTransform: 'uppercase' as const },
-  sheetTitle: { color: colors.ink, fontSize: 21, fontWeight: '900' as const, marginTop: 3 },
-  close: { color: colors.inkSoft, fontSize: 30, lineHeight: 30 },
-  subscribeProductCard: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: 10, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.lineSoft, borderRadius: 13, padding: 10, marginTop: 14 },
-  thumb: { width: 58, height: 58, borderRadius: 10, backgroundColor: colors.block },
-  bold: { color: colors.ink, fontWeight: '900' as const },
-  planPrice: { color: colors.greenDark, fontWeight: '900' as const },
-  stepTitle: { color: colors.ink, fontWeight: '900' as const, marginTop: 15, marginBottom: 7 },
-  plan: { flexDirection: 'row' as const, alignItems: 'center' as const, borderWidth: 1, borderColor: colors.lineSoft, borderRadius: 12, padding: 11, marginBottom: 7, backgroundColor: colors.panel },
-  planSelected: { borderColor: colors.green, backgroundColor: colors.greenTint },
-  planMeta: { color: colors.inkSoft, fontSize: 11, marginTop: 2 },
-  selected: { color: colors.greenDark, fontSize: 11, fontWeight: '900' as const },
-  quantityControl: { flexDirection: 'row' as const, alignItems: 'center' as const, alignSelf: 'flex-start' as const, gap: 12 },
-  quantityButton: { width: 40, height: 40, borderRadius: 11, borderWidth: 1, borderColor: colors.line, alignItems: 'center' as const, justifyContent: 'center' as const },
-  quantityText: { fontSize: 22, color: colors.greenDark, fontWeight: '900' as const },
-  quantityValue: { minWidth: 30, textAlign: 'center' as const, color: colors.ink, fontWeight: '900' as const },
-  dateBox: { borderWidth: 1, borderColor: colors.lineSoft, borderRadius: 12, backgroundColor: colors.panel, padding: 11 },
-  dateValue: { color: colors.ink, fontWeight: '900' as const },
-  dateInput: { color: colors.ink, fontWeight: '900' as const, paddingVertical: 2 },
-  benefit: { backgroundColor: colors.greenTint, borderRadius: 12, padding: 11, marginVertical: 14 },
-};
+});

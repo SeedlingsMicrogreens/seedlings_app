@@ -1,0 +1,153 @@
+# Current system documentation
+
+For Admin ↔ Website shared data and cross-application workflows, see `SYSTEM-INTEGRATION.md`.
+
+# Website Current State
+
+> This file describes the current Website implementation. It is not a historical phase log. If an old phase document conflicts with the current source, inspect the source and update this file rather than reviving the old behavior.
+
+## 1. Application architecture
+
+### Frontend
+- Next.js 16.3.4 / React 19.1.0 / TypeScript.
+- Customer UI includes catalogue, product detail, cart, checkout, account, profile, addresses, orders, subscriptions and delivery calendar.
+- Existing prototype HTML/CSS is retained in `public/prototype` as a visual/reference asset; it is not the source of truth for live customer data.
+- Shared component boundaries exist under `components/ui`, `components/layout` and `components/business`.
+
+### Data and authentication
+- Firebase Firestore is the primary application data store.
+- Firebase Web SDK is used by browser customer flows.
+- Firebase Authentication is used for the customer session.
+- Customer records and many customer reads are scoped using the logged-in customer identity/mobile as implemented by the current source.
+
+### Server-side operations
+The current source contains Next.js Route Handlers under `app/api`, including Cashfree payment routes and subscription delivery actions. These routes use server-side Firebase Admin SDK code under `lib/server`.
+
+The repository also contains a separate `functions/` Firebase Functions project with Cashfree functions. Do not assume that the older documentation statement that Functions were removed is still authoritative; the actual current source contains both mechanisms. Any future removal/consolidation requires an explicit requirement and verification of deployment usage.
+
+## 2. Core customer flows
+
+### Catalogue / Product detail
+- Salable Products are customer-facing products.
+- Product detail supports one-time purchase and, where eligible, subscription purchase.
+- Subscription eligibility excludes unsupported combo/multiple products according to the current website rule.
+- Active Product selling options are used for subscription packaging when available.
+- Subscription plans are Product-specific; a customer should only see plans configured for the current salable Product.
+- Subscription plan pricing may be selling-option-specific and must not be mixed across Products.
+
+### Cart
+- Cart displays products as vertical cards, with two cards per row on desktop and one per row on smaller screens.
+- Cart uses the unified cart model for one-time and subscription items.
+- One-time and subscription item operations use their appropriate cart APIs.
+- Browser cart state is local; it is not treated as the canonical Firestore order record.
+
+### Checkout
+- Checkout uses the selected saved address or the add/edit address flow.
+- If no saved address exists, the address form is shown.
+- Delivery charges are recalculated from the selected address pincode.
+- Customer name is handled through the customer profile/address flow as implemented.
+- Saturday is the configured delivery day; customers do not select an arbitrary delivery day.
+- Delivery slot selection is not customer-selectable in the current checkout rules.
+- Online payment is the current checkout payment method.
+
+### Mixed cart pricing
+- Mixed one-time + subscription checkout waives the one-time delivery charge according to the current checkout rule.
+- The waived charge is shown as savings and excluded from the authoritative total.
+- Subscription delivery charges remain applicable.
+- Server-side total calculation must match the customer-facing calculation.
+
+## 3. Payment lifecycle
+
+Cashfree is the payment gateway. The current source contains server-side creation and verification endpoints and payment transaction handling.
+
+Important rules:
+- Browser/mobile clients do not receive Cashfree secret credentials.
+- Payment success is verified server-side; a browser callback alone is not authoritative.
+- Firebase ID tokens are used by server payment endpoints.
+- Payment records and finalization are protected from direct customer writes by the current Firestore rules.
+- Pending/failed/abandoned payment must not be treated as a successful committed order.
+- Successful payment clears the local cart as part of the current flow.
+
+## 4. Orders and subscriptions
+
+- `orders` is the unified transaction/history collection.
+- One-time orders use `orderType: one_time`.
+- Subscription orders use `orderType: subscription` and reference the parent subscription.
+- Creating a subscription creates the subscription and its initial order according to the current implementation.
+- Historical order values must remain based on their stored snapshots, not current Product/plan master prices.
+- Customer subscriptions store product/selling-option/price and delivery-related snapshot data.
+
+## 5. Subscription delivery calendar
+
+- Recorded `subscriptionDeliveries` are used for actual delivery status.
+- Future deliveries can be represented virtually until a delivery document exists.
+- Past dates and today are informational; customer actions are for eligible future deliveries.
+- Reschedule is validated server-side for ownership, active/paid subscription, future date, schedule and delivery state. Skip Delivery has been removed from the approved customer flow.
+- Rescheduled delivery history is retained according to the current two-record model.
+
+## 6. Address and profile behavior
+
+- Existing customer addresses are stored in the customer record.
+- Add, edit and default-address operations are supported.
+- Profile loading is cache-first where implemented, followed by Firestore refresh.
+- Mobile number is taken from the current authenticated customer session state.
+- Missing profile fields use the established placeholders rather than demo values.
+
+## 7. Enquiries
+
+Customer contact/enquiry scenarios are handled separately from normal completed orders. The current Phase 31 source is the authority for the exact enquiry collection and UI behavior.
+
+## 8. Important current UI decisions
+
+- Preserve established Website UX/UI unless a new requirement explicitly changes it.
+- Use the current terminology already established by the source; do not reintroduce older labels from historical phase documents.
+- SweetAlert2 is used for customer confirmation/success interactions where the current implementation specifies it; do not reintroduce browser `window.confirm()` for protected customer flows.
+- Loading placeholders/skeletons are part of the established UX in areas where current source implements them.
+
+## 8.1 Cart product card layout
+
+- Cart uses two product cards per row on desktop.
+- Each desktop/tablet card places the product image on the left and product/cart controls on the right.
+- Mobile collapses each card to a single-column layout.
+- Packaging, one-time/subscription selection, quantity, price and checkout behavior remain unchanged.
+
+## 9. Current repository validation
+
+Available scripts include typecheck, build and E2E tests. Full validation may require installed dependencies and configured Firebase/Cashfree environments. Do not claim a successful full build/typecheck when the required environment is unavailable.
+
+- The right-side cart content is arranged as a continuous stack: product name/packaging, purchase options, then quantity/price.
+- The product image spans that content stack on desktop/tablet, preventing an artificial vertical gap between Packaging and One-time/subscription choices.
+### Phase 46 follow-up — Cart header icon
+The cart navigation preserves the SVG cart icon while the item count is rendered in the separate badge. CMS and cart badge hydration no longer overwrite the icon markup.
+
+### Phase 46 hotfix — AccountHydrator
+- `AccountHydrator` now correctly imports `getCountFromServer`, matching the existing order-count query.
+- This resolves the runtime ReferenceError during account hydration without changing business logic.
+
+
+### Phase 46 delivery logic correction — mixed cart
+- Mixed one-time + subscription checkout has one delivery calculation: Pincode Master delivery charge × subscription deliveries.
+- Separate one-time delivery is not displayed and is not charged in mixed checkout.
+- Subscription-only and one-time-only checkout behavior remains unchanged.
+
+### Phase 46 follow-up — checkout offer and delivery presentation
+- Unified checkout price offers apply to both one-time and subscription product subtotals.
+- The checkout uses one `Delivery charge` row rather than separate one-time/subscription delivery labels.
+- Mixed checkout delivery remains the Pincode Master delivery charge multiplied by subscription deliveries; no separate one-time delivery charge is shown.
+- Subscription order totals include the allocated price-offer discount.
+
+### Phase 46 follow-up — delivery-date resolution and confirmation
+- Cart checkout now performs a smart delivery-date availability check before navigating to `/checkout`.
+- Every one-time and subscription item receives an actual first delivery date. Full quantity is required for a date; partial quantity is not silently placed.
+- Subscription items have priority when competing for the same production inventory, followed by one-time items.
+- If every item is available for the requested date, no confirmation popup is shown.
+- If any item is later/unavailable, the customer sees one delivery-availability confirmation with the affected products and dates.
+- `Yes, Place Order` stores the resolved dates and opens Checkout.
+- `No, Update Cart` sends an enquiry for the affected products, removes those products from the cart, stays on Cart and confirms that the cart was updated and the enquiry was sent. Payment is never started automatically from this path.
+- Checkout displays actual delivery dates for one-time and subscription items.
+- Server-side checkout revalidates the resolved dates and sends the customer back to Cart if availability changed after confirmation.
+- One-time products with different resolved delivery dates are stored in separate order documents so delivery assignments remain date-correct; the single one-time delivery charge is allocated once.
+
+## Phase 46 Bug Fix
+- Fixed checkout crash in `lib/customerOrderAvailability.ts` caused by indexing the reservation map with the cart kind value `one-time` instead of its `oneTime` key.
+- Smart delivery-date resolution now records reservations into the correct subscription/one-time bucket.

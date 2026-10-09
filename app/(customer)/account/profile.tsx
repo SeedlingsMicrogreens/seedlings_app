@@ -1,41 +1,49 @@
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Text, TextInput, View } from 'react-native';
-import { router } from 'expo-router';
-import { Button, Screen } from '../../../components/UI';
-import { colors } from '../../../constants/theme';
+import { useCallback, useState } from 'react';
+import { Alert, StyleSheet, View } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import { router, useFocusEffect } from 'expo-router';
+import { AppCard, AppInput, AppText, Button, LoadingState, ProfileAvatar, Screen, TextAction } from '../../../components/UI';
+import { colors, spacing } from '../../../constants/theme';
 import { useAppStore } from '../../../store/appStore';
-import { getCustomerProfile, updateCustomerProfile } from '../../../services/customerProfile';
+import { getCachedCustomerProfile, getCustomerProfile, updateCustomerProfile } from '../../../services/customerProfile';
+import { removeCustomerProfilePhoto, uploadCustomerProfilePhoto } from '../../../services/customerProfilePhoto';
 
 export default function CustomerProfileScreen() {
   const mobile = useAppStore((state) => state.mobile);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
-  const PREFERRED_DELIVERY_DAY = 'Saturday';
+  const [photoUrl, setPhotoUrl] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState(false);
 
-  useEffect(() => {
+  useFocusEffect(useCallback(() => {
     let active = true;
+    if (!mobile) { router.replace('/(customer)/auth/login'); return () => { active = false; }; }
+
+    const cached = getCachedCustomerProfile(mobile);
+    if (cached) {
+      setName(cached.name);
+      setEmail(cached.email);
+      setPhotoUrl(cached.photoUrl);
+      setLoading(false);
+    }
+
     const load = async () => {
-      if (!mobile) {
-        router.replace('/(customer)/auth/login');
-        return;
-      }
       try {
         const profile = await getCustomerProfile(mobile);
         if (!active) return;
         setName(profile.name);
         setEmail(profile.email);
+        setPhotoUrl(profile.photoUrl);
       } catch (error) {
         console.error('Customer profile load failed:', error);
-        if (active) Alert.alert('Unable to load profile', 'Please check your internet connection and try again.');
-      } finally {
-        if (active) setLoading(false);
-      }
+        if (active && !cached) Alert.alert('Unable to load profile', 'Please check your internet connection and try again.');
+      } finally { if (active) setLoading(false); }
     };
     void load();
     return () => { active = false; };
-  }, [mobile]);
+  }, [mobile]));
 
   const save = async () => {
     try {
@@ -43,40 +51,78 @@ export default function CustomerProfileScreen() {
       await updateCustomerProfile(mobile, { name, email });
       Alert.alert('Profile updated', 'Your profile has been saved successfully.');
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to update your profile.';
-      Alert.alert('Unable to save profile', message);
-    } finally {
-      setSaving(false);
-    }
+      Alert.alert('Unable to save profile', error instanceof Error ? error.message : 'Unable to update your profile.');
+    } finally { setSaving(false); }
   };
 
-  return (
-    <Screen>
+  const choosePhoto = async () => {
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Photo access required', 'Please allow photo access to choose a profile photo.');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+      });
+      if (result.canceled || !result.assets[0]?.uri) return;
+      setPhotoBusy(true);
+      const url = await uploadCustomerProfilePhoto(mobile, result.assets[0].uri);
+      setPhotoUrl(url);
+    } catch (error) {
+      Alert.alert('Unable to update photo', error instanceof Error ? error.message : 'Please try again.');
+    } finally { setPhotoBusy(false); }
+  };
 
-      {loading ? (
-        <View style={{ paddingVertical: 60, alignItems: 'center' }}>
-          <ActivityIndicator size="large" color={colors.green} />
-          <Text style={{ color: colors.inkSoft, marginTop: 12 }}>Loading profile…</Text>
-        </View>
-      ) : (
-        <View style={{ backgroundColor: colors.panel, borderRadius: 14, borderWidth: 1, borderColor: colors.lineSoft, padding: 16 }}>
-          <Text style={{ color: colors.inkSoft, fontSize: 12, fontWeight: '700', marginBottom: 7 }}>MOBILE NUMBER</Text>
-          <TextInput value={`+91 ${mobile}`} editable={false} style={{ backgroundColor: colors.block, borderWidth: 1, borderColor: colors.lineSoft, borderRadius: 10, height: 50, paddingHorizontal: 14, color: colors.inkSoft, fontSize: 16 }} />
+  const removePhoto = async () => {
+    try {
+      setPhotoBusy(true);
+      await removeCustomerProfilePhoto(mobile);
+      setPhotoUrl(undefined);
+    } catch (error) {
+      Alert.alert('Unable to remove photo', error instanceof Error ? error.message : 'Please try again.');
+    } finally { setPhotoBusy(false); }
+  };
 
-          <Text style={{ color: colors.inkSoft, fontSize: 12, fontWeight: '700', marginTop: 18, marginBottom: 7 }}>NAME</Text>
-          <TextInput value={name} onChangeText={setName} placeholder="Enter your name" placeholderTextColor={colors.inkFaint} autoCapitalize="words" style={{ backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line, borderRadius: 10, height: 50, paddingHorizontal: 14, color: colors.ink, fontSize: 16 }} />
-
-          <Text style={{ color: colors.inkSoft, fontSize: 12, fontWeight: '700', marginTop: 18, marginBottom: 7 }}>EMAIL</Text>
-          <TextInput value={email} onChangeText={setEmail} placeholder="Enter your email (optional)" placeholderTextColor={colors.inkFaint} keyboardType="email-address" autoCapitalize="none" autoCorrect={false} style={{ backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line, borderRadius: 10, height: 50, paddingHorizontal: 14, color: colors.ink, fontSize: 16 }} />
-
-          <Text style={{ color: colors.inkSoft, fontSize: 12, fontWeight: '700', marginTop: 18, marginBottom: 7 }}>PREFERRED DELIVERY DAY</Text>
-          <TextInput value={PREFERRED_DELIVERY_DAY} editable={false} style={{ backgroundColor: colors.block, borderWidth: 1, borderColor: colors.lineSoft, borderRadius: 10, height: 50, paddingHorizontal: 14, color: colors.inkSoft, fontSize: 16 }} />
-
-          <View style={{ marginTop: 22 }}>
-            <Button title={saving ? 'Saving…' : 'Save Changes'} onPress={save} />
+  return <Screen>
+    {loading ? <LoadingState label="Loading profile…" /> : <>
+      <AppCard style={styles.profileCard}>
+        <View style={styles.photoWrap}>
+          <ProfileAvatar uri={photoUrl} name={name} size={96} />
+          <View style={styles.photoActions}>
+            <Button title={photoBusy ? 'Updating…' : photoUrl ? 'Change photo' : 'Add photo'} onPress={choosePhoto} loading={photoBusy} />
+            {photoUrl && !photoBusy ? <TextAction label="Remove photo" tone="danger" onPress={removePhoto} style={styles.removePhoto} /> : null}
           </View>
         </View>
-      )}
-    </Screen>
-  );
+      </AppCard>
+
+      <AppCard>
+        <AppText variant="caption" style={styles.label}>MOBILE NUMBER</AppText>
+        <AppInput value={`+91 ${mobile}`} editable={false} accessibilityLabel="Mobile number" />
+
+        <AppText variant="caption" style={styles.label}>NAME</AppText>
+        <AppInput value={name} onChangeText={setName} placeholder="Enter your name" />
+
+        <AppText variant="caption" style={styles.label}>EMAIL</AppText>
+        <AppInput value={email} onChangeText={setEmail} placeholder="Enter your email (optional)" keyboardType="email-address" />
+
+        <AppText variant="caption" style={styles.label}>PREFERRED DELIVERY DAY</AppText>
+        <AppInput value="Saturday" editable={false} accessibilityLabel="Preferred delivery day" />
+
+        <View style={styles.save}><Button title={saving ? 'Saving…' : 'Save Changes'} onPress={save} loading={saving} /></View>
+      </AppCard>
+    </>}
+  </Screen>;
 }
+
+const styles = StyleSheet.create({
+  profileCard: { alignItems: 'center' },
+  photoWrap: { width: '100%', alignItems: 'center' },
+  photoActions: { width: '100%', marginTop: spacing.md },
+  removePhoto: { alignSelf: 'center', marginTop: 4 },
+  label: { color: colors.inkSoft, fontWeight: '900', marginTop: spacing.md, marginBottom: 7 },
+  save: { marginTop: spacing.lg },
+});

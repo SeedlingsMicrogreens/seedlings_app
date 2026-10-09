@@ -1,6 +1,15 @@
-import { collection, getDocs } from 'firebase/firestore';
+import { collection, getDocs } from '../core/firestore';
 import { db } from '../core/firebaseClient';
 import { getDatabase } from '../../storage/sqlite';
+import { isProductSubscriptionEligible } from './subscriptionEligibility';
+
+export type ProductSellingOption = {
+  id: string;
+  weightGrams: number;
+  mrp: number;
+  price: number;
+  active: boolean;
+};
 
 export type Product = {
   id: string;
@@ -29,10 +38,11 @@ export type Product = {
   active: boolean;
   sortOrder: number;
   currency: string;
+  sellingOptions: ProductSellingOption[];
 };
 
 type SalesProductDocument = Record<string, unknown>;
-const CACHE_TTL_MS = 30 * 60 * 1000;
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function numberValue(value: unknown, fallback = 0) {
   const n = Number(value);
@@ -76,6 +86,18 @@ function normalize(docId: string, raw: SalesProductDocument): Product {
   const type = raw.type === 'multiple' ? 'multiple' : 'single';
   const active = raw.active === true;
   const moods = productMoods(raw);
+  const sellingOptions: ProductSellingOption[] = Array.isArray(raw.sellingOptions)
+    ? raw.sellingOptions.map((option) => {
+        const item = (option ?? {}) as Record<string, unknown>;
+        return {
+          id: stringValue(item.id),
+          weightGrams: numberValue(item.weightGrams),
+          mrp: numberValue(item.mrp),
+          price: numberValue(item.price),
+          active: item.active !== false,
+        };
+      }).filter((option) => option.id && option.weightGrams > 0 && option.price >= 0)
+    : [];
   return {
     id: docId,
     name: stringValue(raw.name, 'Unnamed Product'),
@@ -102,6 +124,7 @@ function normalize(docId: string, raw: SalesProductDocument): Product {
     active,
     sortOrder: numberValue(raw.sortOrder, 0),
     currency: stringValue(raw.currency, 'INR'),
+    sellingOptions,
   };
 }
 
@@ -158,12 +181,15 @@ export async function refreshProducts() {
 }
 export function getCachedProducts(): Product[] { return readCachedProducts(); }
 
+export function getDefaultOneTimeSellingOption(product: Product): ProductSellingOption | undefined {
+  const options = Array.isArray(product.sellingOptions) ? product.sellingOptions : [];
+  return options.slice()
+    .filter((option) => option.active !== false && option.weightGrams > 0)
+    .sort((a, b) => a.weightGrams - b.weightGrams)[0];
+}
+
 export function isSubscriptionEligible(product: Product): boolean {
-  if (product.active !== true || product.subscriptionPurchase !== true) return false;
-  if (product.type === 'multiple') return false;
-  if (!Array.isArray(product.components) || product.components.length !== 1) return false;
-  const component = product.components[0];
-  return Boolean(component?.productId) && Number(component?.quantityGrams) > 0;
+  return isProductSubscriptionEligible(product);
 }
 
 export function productSlug(product: Product): string {

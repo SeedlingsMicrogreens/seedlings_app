@@ -1,129 +1,102 @@
-import { ActivityIndicator, Alert, Pressable, Text, TextInput, View } from 'react-native';
+import { Alert, StyleSheet, View } from 'react-native';
 import { useEffect, useState } from 'react';
-import { router, useLocalSearchParams } from 'expo-router';
-import { Screen } from '../../../components/UI';
+import { router } from 'expo-router';
+import { AppCard, AppText, Button, LoadingState, PageTitle, Screen } from '../../../components/UI';
 import { colors } from '../../../constants/theme';
 import { useAppStore } from '../../../store/appStore';
-import { getCustomerAddresses, type CustomerAddress } from '../../../services/customerAddresses';
-import { getProducts, isSubscriptionEligible, type Product } from '../../../services/products/productService';
-import { getActiveSubscriptionPlans, getCustomerSubscriptions, prettySubscriptionStatus, createCustomerSubscription, updateCustomerSubscription, type CustomerSubscription, type SubscriptionPlan } from '../../../services/subscriptions/subscriptionService';
-import { checkProductAvailability, nextWeekSaturday } from '../../../services/orders/customerOrderAvailability';
-import { confirmHarvestShortage } from '../../../services/orders/customerAlerts';
-
-const money = (n: number) => `₹${n.toLocaleString('en-IN')}`;
-const addressText = (a: CustomerAddress) => [a.addressLine1, a.addressLine2, a.landmark, a.city, a.state, a.pincode].filter(Boolean).join(', ');
-const today = () => new Date().toISOString().slice(0, 10);
+import { getCustomerSubscriptions, prettySubscriptionStatus, updateCustomerSubscription, type CustomerSubscription } from '../../../services/subscriptions/subscriptionService';
 
 export default function Subscriptions() {
   const mobile = useAppStore((s) => s.mobile);
-  const params = useLocalSearchParams<{ productId?: string; planId?: string; quantity?: string }>();
-  const [plans, setPlans] = useState<SubscriptionPlan[]>([]);
   const [subs, setSubs] = useState<CustomerSubscription[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [addresses, setAddresses] = useState<CustomerAddress[]>([]);
-  const [selectedPlan, setSelectedPlan] = useState('');
-  const [selectedProduct, setSelectedProduct] = useState('');
-  const [selectedAddress, setSelectedAddress] = useState('');
-  const [quantity, setQuantity] = useState('1');
-  const [startDate, setStartDate] = useState(today());
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    let alive = true;
-    if (!mobile) { router.replace('/(customer)/auth/login'); return () => { alive = false; }; }
-    (async () => {
-      try {
-        const [p, s, pr, a] = await Promise.all([getActiveSubscriptionPlans(), getCustomerSubscriptions(mobile), getProducts(), getCustomerAddresses(mobile)]);
-        if (!alive) return;
-        const eligible = pr.products.filter(isSubscriptionEligible);
-        setPlans(p); setSubs(s); setProducts(eligible); setAddresses(a);
-        setSelectedProduct(params.productId && eligible.some((x) => x.id === params.productId) ? params.productId : '');
-        setSelectedPlan(params.planId && p.some((x) => x.id === params.planId) ? params.planId : '');
-        setSelectedAddress(a[0]?.id || '');
-        setQuantity(params.quantity && Number(params.quantity) > 0 ? String(Math.max(1, Math.floor(Number(params.quantity)))) : '1');
-        setStartDate(today());
-      } catch (e) {
-        if (alive) Alert.alert('Unable to load subscriptions', e instanceof Error ? e.message : 'Please try again.');
-      } finally { if (alive) setLoading(false); }
-    })();
-    return () => { alive = false; };
-  }, [mobile, params.productId, params.planId, params.quantity]);
-
-  const active = subs.find((s) => s.status === 'active');
-  const product = products.find((p) => p.id === selectedProduct);
-  const selectedAddressObject = addresses.find((a) => a.id === selectedAddress);
-
-  const create = async () => {
-    if (!mobile || !product || !selectedPlan || !selectedAddressObject) {
-      Alert.alert('Incomplete subscription', 'Choose a subscription plan and delivery address before continuing.'); return;
+  const load = async () => {
+    if (!mobile) {
+      router.replace('/(customer)/auth/login');
+      return;
     }
-    const qty = Math.max(1, Math.floor(Number(quantity) || 1));
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) { Alert.alert('Invalid start date', 'Enter the start date as YYYY-MM-DD.'); return; }
-    setBusy(true);
+    setLoading(true);
     try {
-      const availability = await checkProductAvailability({ product, quantity: qty, deliveryDate: nextWeekSaturday() });
-      let shortageDecision: 'continue' | 'contact' | undefined;
-      if (availability.hasShortage) {
-        shortageDecision = await confirmHarvestShortage({ mode: 'subscription', availableGrams: availability.availableGrams, requestedGrams: availability.requestedGrams, shortageGrams: availability.shortageGrams });
-      }
-      const result = await createCustomerSubscription({ mobile, productId: product.id, planId: selectedPlan, addressId: selectedAddressObject.id, quantity: qty, startDate, shortageDecision });
-      Alert.alert('Subscription created', result.subscriptionNumber ? `Subscription ${result.subscriptionNumber} was created.` : 'Your subscription was created.');
       setSubs(await getCustomerSubscriptions(mobile));
-    } catch (e) {
-      if (e instanceof Error && e.message === 'HARVEST_SHORTAGE_CONFIRMATION_REQUIRED') Alert.alert('Limited harvest available', 'Please review the harvest availability before continuing.');
-      else Alert.alert('Unable to create subscription', e instanceof Error ? e.message : 'Please try again.');
-    } finally { setBusy(false); }
+    } catch (error) {
+      Alert.alert('Unable to load subscriptions', error instanceof Error ? error.message : 'Please try again.');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const update = async (action: 'pause' | 'resume' | 'cancel') => {
-    if (!mobile || !active) return;
-    setBusy(true);
-    try { await updateCustomerSubscription({ mobile, subscriptionId: active.id, action }); setSubs(await getCustomerSubscriptions(mobile)); }
-    catch (e) { Alert.alert('Unable to update subscription', e instanceof Error ? e.message : 'Please try again.'); }
-    finally { setBusy(false); }
+  useEffect(() => { void load(); }, [mobile]);
+
+  const update = (subscription: CustomerSubscription, action: 'pause' | 'resume' | 'cancel') => {
+    if (!mobile) return;
+    const labels = { pause: 'Pause', resume: 'Resume', cancel: 'Cancel' } as const;
+    const label = labels[action];
+    const message = action === 'pause'
+      ? 'Future subscription deliveries will remain on the subscription but the subscription will be paused until you resume it.'
+      : action === 'resume'
+        ? 'This will resume the subscription.'
+        : 'This will permanently cancel the subscription. It cannot be resumed after cancellation.';
+    Alert.alert(`${label} subscription?`, message, [
+      { text: 'No', style: 'cancel' },
+      { text: label, style: action === 'cancel' ? 'destructive' : 'default', onPress: () => void (async () => {
+        setBusy(true);
+        try {
+          await updateCustomerSubscription({ mobile, subscriptionId: subscription.id, action });
+          await load();
+        } catch (error) {
+          Alert.alert(`${label} failed`, error instanceof Error ? error.message : 'Please try again.');
+        } finally { setBusy(false); }
+      }) },
+    ]);
   };
 
-  if (loading) return <Screen><ActivityIndicator size="large" color={colors.green} style={{ marginTop: 45 }} /></Screen>;
+  if (loading) return <Screen><LoadingState label="Loading subscriptions…" /></Screen>;
 
   return <Screen>
+    <PageTitle title="My Subscriptions" subtitle="Manage your existing subscription deliveries here. Choose subscription plans from a product page." />
 
-    <View style={styles.panel}><Text style={styles.title}>My Subscription</Text>{active ? <><Text style={styles.productName}>{active.productName || 'Subscription'}</Text><Text style={styles.muted}>{active.sellingOptionLabel || 'Pack'} × {active.quantity || 1} · {active.frequency || ''} · Saturday delivery</Text><View style={styles.kpis}>{[['Status', prettySubscriptionStatus(active.status)], ['Deliveries', String(active.totalDeliveries ?? '—')], ['Remaining', String(active.remainingDeliveries ?? '—')]].map(([label, value]) => <View key={label} style={styles.kpi}><Text style={styles.small}>{label}</Text><Text style={styles.kpiValue}>{value}</Text></View>)}</View><Text style={styles.muted}>Next delivery: <Text style={styles.bold}>{active.nextDeliveryDate || '—'}</Text></Text><View style={styles.actions}>{active.status === 'active' ? <Pressable disabled={busy} onPress={() => update('pause')} style={styles.outline}><Text style={styles.greenText}>Pause</Text></Pressable> : null}{active.status === 'paused' ? <Pressable disabled={busy} onPress={() => update('resume')} style={styles.primary}><Text style={styles.white}>Resume</Text></Pressable> : null}{['active', 'paused'].includes(String(active.status)) ? <Pressable disabled={busy} onPress={() => Alert.alert('Cancel subscription', 'Cancel this subscription?', [{ text: 'Keep', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: () => { void update('cancel'); } }])} style={styles.outline}><Text style={{ color: colors.danger, fontWeight: '900' }}>Cancel</Text></Pressable> : null}</View></> : <Text style={styles.muted}>No active subscription found.</Text>}</View>
+    {subs.length ? subs.map((subscription) => {
+      const status = String(subscription.status ?? '').toLowerCase();
+      const canPause = status === 'active';
+      const canResume = status === 'paused';
+      const canCancel = status === 'active' || status === 'paused';
+      return <AppCard key={subscription.id} style={styles.card}>
+        <View style={styles.row}>
+          <View style={styles.copy}>
+            <AppText variant="h3">{subscription.productName || 'Subscription'}</AppText>
+            <AppText variant="bodySmall" style={styles.muted}>{subscription.sellingOptionLabel || 'Pack'} × {subscription.quantity || 1} · {subscription.frequency || 'Subscription'} · Saturday delivery</AppText>
+          </View>
+          <AppText variant="bodySmall" style={styles.status}>{prettySubscriptionStatus(subscription.status)}</AppText>
+        </View>
+        <AppText variant="bodySmall" style={styles.muted}>Next delivery: <AppText variant="bodySmall" style={styles.bold}>{subscription.nextDeliveryDate || '—'}</AppText></AppText>
+        <AppText variant="bodySmall" style={styles.muted}>Remaining deliveries: <AppText variant="bodySmall" style={styles.bold}>{subscription.remainingDeliveries ?? '—'}</AppText></AppText>
+        {(canPause || canResume || canCancel) ? <View style={styles.actions}>
+          {canPause ? <Button title="Pause" secondary disabled={busy} onPress={() => update(subscription, 'pause')} style={styles.actionButton} /> : null}
+          {canResume ? <Button title="Resume" disabled={busy} onPress={() => update(subscription, 'resume')} style={styles.actionButton} /> : null}
+          {canCancel ? <Button title="Cancel" secondary disabled={busy} onPress={() => update(subscription, 'cancel')} style={styles.actionButton} /> : null}
+        </View> : null}
+      </AppCard>;
+    }) : <AppCard>
+      <AppText variant="h2">No subscriptions yet</AppText>
+      <AppText variant="bodySmall" style={styles.muted}>Open a subscription-eligible product to choose a plan and start date.</AppText>
+      <View style={styles.shopButton}><Button title="Shop Fresh" onPress={() => router.push('/(customer)/(tabs)/products')} /></View>
+    </AppCard>}
 
-    <Text style={styles.section}>Available plans</Text>{plans.length ? plans.map((plan) => <Pressable key={plan.id} onPress={() => setSelectedPlan(plan.id)} style={[styles.plan, selectedPlan === plan.id && styles.planSelected]}><View style={styles.row}><View style={{ flex: 1 }}><Text style={styles.planName}>{plan.name}</Text><Text style={styles.muted}>{plan.frequency}{plan.deliveriesPerTerm ? ` · ${plan.deliveriesPerTerm} deliveries` : ''} · Saturday</Text></View><Text style={styles.price}>{money(plan.price)}</Text></View>{selectedPlan === plan.id ? <Text style={styles.greenText}>Selected</Text> : null}</Pressable>) : <Text style={styles.muted}>No active subscription plans are available.</Text>}
-
-    {selectedProduct ? <><Text style={styles.section}>Start subscription</Text><View style={styles.panel}><Text style={styles.muted}>Product: <Text style={styles.bold}>{product?.name || 'Product'}</Text></Text><Text style={styles.label}>Delivery address</Text>{addresses.length ? addresses.map((a) => <Pressable key={a.id} onPress={() => setSelectedAddress(a.id)} style={[styles.address, selectedAddress === a.id && styles.planSelected]}><Text style={styles.bold}>{a.label || 'Address'}</Text><Text style={styles.muted}>{addressText(a)}</Text></Pressable>) : <Text style={styles.muted}>Add a delivery address before creating a subscription.</Text>}<Text style={styles.label}>Packs per delivery</Text><TextInput value={quantity} onChangeText={setQuantity} keyboardType="number-pad" style={styles.input} /><Text style={styles.label}>Start date</Text><TextInput value={startDate} onChangeText={setStartDate} placeholder="YYYY-MM-DD" style={styles.input} autoCapitalize="none" /><Text style={styles.muted}>Delivery is Saturday ({nextWeekSaturday()}). Monthly and Quarterly are the configured customer subscription plans.</Text><Pressable disabled={busy || !selectedPlan || !selectedAddress} onPress={() => void create()} style={[styles.primaryButton, (busy || !selectedPlan || !selectedAddress) && styles.disabled]}><Text style={styles.white}>{busy ? 'Creating…' : 'Create Subscription'}</Text></Pressable></View></> : <View style={styles.panel}><Text style={styles.title}>Start subscription</Text><Text style={styles.muted}>Choose Subscribe on a subscription-eligible product from Microgreens to select the product here.</Text><Pressable onPress={() => router.push('/(customer)/(tabs)/products')} style={{ marginTop: 12 }}><Text style={styles.greenText}>Shop Fresh →</Text></Pressable></View>}
-
-    <Text style={styles.section}>My Subscriptions</Text>{subs.length ? subs.map((s) => <View key={s.id} style={styles.panel}><View style={styles.row}><View style={{ flex: 1 }}><Text style={styles.planName}>{s.productName || 'Subscription'}</Text><Text style={styles.muted}>{s.sellingOptionLabel || ''} × {s.quantity || 1} · {s.frequency || ''} · Saturday delivery</Text></View><Text style={styles.greenText}>{prettySubscriptionStatus(s.status)}</Text></View><Text style={styles.muted}>Next delivery: <Text style={styles.bold}>{s.nextDeliveryDate || '—'}</Text></Text></View>) : <Text style={styles.muted}>No subscriptions found for this customer.</Text>}
-    <Pressable onPress={() => router.push('/(customer)/account/delivery-calendar')} style={styles.outlineButton}><Text style={styles.greenText}>View Delivery Calendar</Text></Pressable>
+    <View style={styles.calendarButton}><Button title="View Delivery Calendar" secondary onPress={() => router.push('/(customer)/account/delivery-calendar')} /></View>
   </Screen>;
 }
 
-const styles = {
-  panel: { backgroundColor: colors.panel, borderRadius: 14, borderWidth: 1, borderColor: colors.lineSoft, padding: 16, marginBottom: 12 },
-  title: { fontSize: 18, fontWeight: '900' as const, color: colors.ink },
-  productName: { fontSize: 17, fontWeight: '900' as const, color: colors.greenDark, marginTop: 12 },
-  muted: { color: colors.inkSoft, marginTop: 5, lineHeight: 20 as const },
-  bold: { fontWeight: '900' as const, color: colors.ink },
-  small: { fontSize: 10, color: colors.inkSoft, fontWeight: '800' as const },
-  kpis: { flexDirection: 'row' as const, gap: 8, marginTop: 14 },
-  kpi: { flex: 1, backgroundColor: colors.greenTint, borderRadius: 10, padding: 10 },
-  kpiValue: { fontSize: 14, color: colors.greenDark, fontWeight: '900' as const, marginTop: 3 },
-  actions: { flexDirection: 'row' as const, gap: 8, marginTop: 12 },
-  outline: { flex: 1, borderWidth: 1, borderColor: colors.green, borderRadius: 12, padding: 13, alignItems: 'center' as const },
-  primary: { flex: 1, backgroundColor: colors.green, borderRadius: 12, padding: 13, alignItems: 'center' as const },
-  white: { color: colors.white, fontWeight: '900' as const },
-  greenText: { color: colors.greenDark, fontWeight: '900' as const },
-  section: { fontSize: 18, fontWeight: '900' as const, color: colors.ink, marginTop: 6, marginBottom: 10 },
-  plan: { backgroundColor: colors.panel, borderRadius: 14, borderWidth: 1, borderColor: colors.lineSoft, padding: 15, marginBottom: 10 },
-  planSelected: { borderColor: colors.green, backgroundColor: colors.greenTint },
-  row: { flexDirection: 'row' as const, justifyContent: 'space-between' as const, alignItems: 'center' as const, gap: 10 },
-  planName: { fontSize: 16, fontWeight: '900' as const, color: colors.ink },
-  price: { fontSize: 18, fontWeight: '900' as const, color: colors.greenDark },
-  address: { borderWidth: 1, borderColor: colors.lineSoft, borderRadius: 10, padding: 11, marginTop: 8 },
-  label: { fontWeight: '900' as const, color: colors.ink, marginTop: 14, marginBottom: 6 },
-  input: { backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.lineSoft, borderRadius: 10, padding: 11 },
-  primaryButton: { backgroundColor: colors.green, borderRadius: 13, padding: 15, alignItems: 'center' as const, marginTop: 14 },
-  disabled: { backgroundColor: colors.line },
-  outlineButton: { borderWidth: 1, borderColor: colors.green, borderRadius: 12, padding: 13, alignItems: 'center' as const, marginTop: 4, marginBottom: 20 },
-};
+const styles = StyleSheet.create({
+  card: { marginBottom: 12 },
+  row: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  copy: { flex: 1, minWidth: 0 },
+  muted: { color: colors.inkSoft, marginTop: 5, lineHeight: 20 },
+  bold: { fontWeight: '900', color: colors.ink },
+  status: { color: colors.greenDark, fontWeight: '900' },
+  actions: { flexDirection: 'row', gap: 8, marginTop: 14 },
+  actionButton: { flex: 1 },
+  shopButton: { marginTop: 14 },
+  calendarButton: { marginTop: 4, marginBottom: 20 },
+});

@@ -1,8 +1,9 @@
 import { Tabs } from 'expo-router';
-import { Text, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { colors, typography } from '../../../constants/theme';
+import { colors, elevation, layout, typography } from '../../../constants/theme';
+import { AppBadge } from '../../../components/UI';
 import { useAppStore } from '../../../store/appStore';
 
 const tabIcons = {
@@ -19,13 +20,13 @@ function TabIcon({ routeName, active, badge }: { routeName: keyof typeof tabIcon
   return (
     <View style={styles.iconSlot}>
       {isCart ? (
-        <View style={[styles.cartIcon, active ? styles.cartIconActive : styles.cartIconInactive]}>
+        <View style={styles.cartIcon}>
           <MaterialCommunityIcons name="cart-outline" size={active ? 25 : 24} color={colors.white} />
         </View>
       ) : (
         <MaterialCommunityIcons name={iconName} size={active ? 24 : 23} color={active ? colors.greenDark : colors.inkFaint} />
       )}
-      {badge && badge > 0 ? <View style={styles.badge}><Text style={styles.badgeText}>{badge > 99 ? '99+' : badge}</Text></View> : null}
+      {badge && badge > 0 ? <AppBadge style={styles.badge}>{badge > 99 ? '99+' : badge}</AppBadge> : null}
     </View>
   );
 }
@@ -33,7 +34,7 @@ function TabIcon({ routeName, active, badge }: { routeName: keyof typeof tabIcon
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
   const cartCount = useAppStore((s) => s.cart.reduce((sum, item) => sum + item.quantity, 0) + s.subscriptionCart.reduce((sum, item) => sum + item.quantity, 0));
-  const tabBarHeight = 84 + insets.bottom;
+  const tabBarHeight = layout.tabBarHeight + insets.bottom;
 
   return (
     <Tabs screenOptions={({ route }) => ({
@@ -43,11 +44,13 @@ export default function TabLayout() {
       tabBarStyle: {
         height: tabBarHeight,
         paddingBottom: insets.bottom,
-        paddingTop: 4,
+        paddingTop: 6,
         backgroundColor: colors.panel,
         borderTopColor: colors.lineSoft,
         borderTopWidth: 1,
         overflow: 'visible',
+        zIndex: 100,
+        elevation: 8,
       },
       tabBarLabelStyle: {
         fontFamily: typography.fontFamily,
@@ -57,9 +60,14 @@ export default function TabLayout() {
         marginTop: 0,
       },
       tabBarIconStyle: {
-        height: 44,
+        height: ICON_SLOT_HEIGHT,
         marginTop: 0,
-        marginBottom: 0,
+        marginBottom: 1,
+      },
+      tabBarItemStyle: {
+        height: '100%',
+        flex: 1,
+        paddingTop: 3,
       },
       tabBarIcon: ({ focused }) => {
         return <TabIcon routeName={route.name as keyof typeof tabIcons} active={focused} badge={route.name === 'cart' ? cartCount : undefined} />;
@@ -74,53 +82,29 @@ export default function TabLayout() {
   );
 }
 
-const styles = {
+// The icon slot matches tabBarIconStyle.height so icons never overflow into the label. The 44dp cart circle is
+// raised so its bottom edge aligns with the slot bottom (it protrudes upward instead of covering the "Cart" label).
+const ICON_SLOT_HEIGHT = 28;
+const CART_CIRCLE = 44;
+
+const styles = StyleSheet.create({
   iconSlot: {
-    width: 56,
-    height: 56,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    position: 'relative' as const,
-    overflow: 'visible' as const,
+    width: CART_CIRCLE,
+    height: ICON_SLOT_HEIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'visible',
   },
   cartIcon: {
-    width: 54,
-    height: 54,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    borderRadius: 27,
+    ...elevation.sm,
+    position: 'absolute',
+    bottom: 0,
+    width: CART_CIRCLE,
+    height: CART_CIRCLE,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: CART_CIRCLE / 2,
     backgroundColor: colors.greenDark,
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 5,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
   },
-  cartIconActive: {
-    transform: [{ translateY: -8 }],
-  },
-  cartIconInactive: {
-    transform: [{ translateY: -5 }],
-  },
-  badge: {
-    position: 'absolute' as const,
-    top: 0,
-    right: 0,
-    minWidth: 20,
-    height: 20,
-    paddingHorizontal: 4,
-    borderRadius: 10,
-    backgroundColor: colors.orange,
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-    borderWidth: 2,
-    borderColor: colors.panel,
-  },
-  badgeText: {
-    color: colors.white,
-    fontFamily: typography.fontFamily,
-    fontSize: 9,
-    fontWeight: '900' as const,
-    lineHeight: 12,
-  },
-};
+  badge: { position: 'absolute', top: -CART_CIRCLE + ICON_SLOT_HEIGHT, right: -2, borderWidth: 2, borderColor: colors.panel },
+});

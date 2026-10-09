@@ -1,4 +1,4 @@
-import { collection, getDocs, orderBy, query, where } from 'firebase/firestore';
+import { collection, getDocs, orderBy, query, where } from '../core/firestore';
 import { db } from '../core/firebaseClient';
 import { normalizeIndianMobile } from '../clientOnboarding';
 

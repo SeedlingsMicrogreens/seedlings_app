@@ -1,13 +1,16 @@
-import { collection, getDocs, orderBy, query, where } from 'firebase/firestore';
-import { db } from '../core/firebaseClient';
+import { collection, doc, getDoc, getDocs, onSnapshot, query, updateDoc, where, serverTimestamp, setDoc } from '../core/firestore';
+import { db, auth } from '../core/firebaseClient';
 
 export type CustomerNotification = {
   id: string;
   title: string;
   message: string;
   type?: string;
+  source?: string;
+  event?: string;
   read?: boolean;
   createdAt?: unknown;
+  readAt?: unknown;
   orderId?: string;
   orderNumber?: string;
   subscriptionId?: string;
@@ -34,7 +37,10 @@ function mapNotification(id: string, data: Record<string, unknown>): CustomerNot
     title: asString(data.title) ?? asString(data.heading) ?? 'Notification',
     message: asString(data.message) ?? asString(data.body) ?? asString(data.description) ?? '',
     type: asString(data.type),
+    source: asString(data.source),
+    event: asString(data.event),
     read: data.read === true || data.isRead === true,
+    readAt: data.readAt,
     createdAt: data.createdAt ?? data.timestamp ?? data.sentAt,
     orderId: asString(data.orderId),
     orderNumber: asString(data.orderNumber),
@@ -45,12 +51,90 @@ function mapNotification(id: string, data: Record<string, unknown>): CustomerNot
 export async function getCustomerNotifications(mobile: string): Promise<CustomerNotification[]> {
   const normalizedMobile = mobile.replace(/\D/g, '');
   if (!normalizedMobile) return [];
+  const authUid = auth.currentUser?.uid;
+  const queries = [
+    getDocs(query(collection(db, 'notifications'), where('recipientCustomerId', '==', normalizedMobile))),
+    ...(authUid ? [getDocs(query(collection(db, 'notifications'), where('recipientUid', '==', authUid)))] : []),
+  ];
+  const snapshots = await Promise.all(queries);
+  const map = new Map<string, CustomerNotification>();
+  snapshots.forEach((snapshot) => snapshot.docs.forEach((item) => map.set(item.id, mapNotification(item.id, item.data() as Record<string, unknown>))));
+  return [...map.values()].sort((a, b) => toDateValue(b.createdAt) - toDateValue(a.createdAt));
+}
 
-  const snapshot = await getDocs(
-    query(collection(db, 'notifications'), where('customerId', '==', normalizedMobile)),
-  );
+export function subscribeToCustomerNotifications(
+  mobile: string,
+  onChange: (items: CustomerNotification[]) => void,
+  onError?: (error: Error) => void,
+) {
+  const normalizedMobile = mobile.replace(/\D/g, '');
+  const authUid = auth.currentUser?.uid;
+  if (!normalizedMobile || !authUid) {
+    onChange([]);
+    return () => {};
+  }
 
-  return snapshot.docs
-    .map((doc) => mapNotification(doc.id, doc.data() as Record<string, unknown>))
-    .sort((a, b) => toDateValue(b.createdAt) - toDateValue(a.createdAt));
+  const byCustomer = query(collection(db, 'notifications'), where('recipientCustomerId', '==', normalizedMobile));
+  const byUid = query(collection(db, 'notifications'), where('recipientUid', '==', authUid));
+  let customerItems: CustomerNotification[] = [];
+  let uidItems: CustomerNotification[] = [];
+  const publish = () => {
+    const map = new Map<string, CustomerNotification>();
+    [...customerItems, ...uidItems].forEach((item) => map.set(item.id, item));
+    onChange([...map.values()].sort((a, b) => toDateValue(b.createdAt) - toDateValue(a.createdAt)));
+  };
+  const unsubscribeCustomer = onSnapshot(byCustomer, (snapshot) => {
+    customerItems = snapshot.docs.map((item: any) => mapNotification(item.id, item.data() as Record<string, unknown>));
+    publish();
+  }, onError);
+  const unsubscribeUid = onSnapshot(byUid, (snapshot) => {
+    uidItems = snapshot.docs.map((item: any) => mapNotification(item.id, item.data() as Record<string, unknown>));
+    publish();
+  }, onError);
+  return () => { unsubscribeCustomer(); unsubscribeUid(); };
+}
+
+export async function markCustomerNotificationRead(id: string): Promise<void> {
+  await updateDoc(doc(db, 'notifications', id), { read: true, readAt: serverTimestamp() });
+}
+
+export async function markAllCustomerNotificationsRead(items: CustomerNotification[]): Promise<void> {
+  await Promise.all(items.filter((item) => !item.read).map((item) => markCustomerNotificationRead(item.id)));
+}
+
+export async function getCustomerNotificationById(id: string): Promise<CustomerNotification | null> {
+  const snapshot = await getDoc(doc(db, 'notifications', id));
+  return snapshot.exists() ? mapNotification(snapshot.id, snapshot.data() as Record<string, unknown>) : null;
+}
+
+export function notificationCreatedAt(item: CustomerNotification): number {
+  return toDateValue(item.createdAt);
+}
+
+export function notificationUnreadCount(items: CustomerNotification[]): number {
+  return items.reduce((count, item) => count + (item.read ? 0 : 1), 0);
+}
+
+export async function registerCustomerPushToken(mobile: string, token: string): Promise<void> {
+  const normalizedMobile = mobile.replace(/\D/g, '');
+  const uid = auth.currentUser?.uid;
+  if (!normalizedMobile || !uid || !token) return;
+  const id = `android_${tokenHashId(token)}`;
+  await setDoc(doc(db, 'customerPushSubscriptions', id), {
+    token,
+    customerId: normalizedMobile,
+    authUid: uid,
+    platform: 'android',
+    active: true,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+}
+
+function tokenHashId(token: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < token.length; i += 1) {
+    hash ^= token.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
 }

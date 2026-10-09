@@ -1,4 +1,4 @@
-import { doc, getDoc, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { doc, getDoc, serverTimestamp, updateDoc } from './core/firestore';
 import { db } from './core/firebaseClient';
 import { normalizeIndianMobile } from './clientOnboarding';
 import { stripUndefined } from './core/firestoreData';

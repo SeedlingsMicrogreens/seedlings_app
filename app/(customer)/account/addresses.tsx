@@ -1,8 +1,8 @@
-import { ActivityIndicator, Alert, Pressable, Text, TextInput, View } from 'react-native';
+import { Alert, StyleSheet, Text, View } from 'react-native';
 import { useEffect, useState } from 'react';
 import { router } from 'expo-router';
-import { Button, Screen } from '../../../components/UI';
-import { colors } from '../../../constants/theme';
+import { AppCard, AppInput, AppText, Button, Chip, LoadingState, PageTitle, Screen, TextAction } from '../../../components/UI';
+import { colors, spacing } from '../../../constants/theme';
 import { useAppStore } from '../../../store/appStore';
 import {
   addCustomerAddress,
@@ -97,21 +97,24 @@ export default function CustomerAddressesScreen() {
   };
 
   const field = (label: string, key: keyof FormState, placeholder: string, options: { keyboardType?: 'default' | 'numeric'; maxLength?: number } = {}) => (
-    <View style={{ marginTop: 14 }} key={key}>
-      <Text style={{ color: colors.inkSoft, fontSize: 12, fontWeight: '700', marginBottom: 7 }}>{label.toUpperCase()}</Text>
-      <TextInput value={String(form[key] ?? '')} onChangeText={(value) => setForm((current) => ({ ...current, [key]: value }))} placeholder={placeholder} placeholderTextColor={colors.inkFaint} keyboardType={options.keyboardType} maxLength={options.maxLength} style={{ backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line, borderRadius: 10, height: 48, paddingHorizontal: 14, color: colors.ink, fontSize: 15 }} />
+    <View style={styles.field} key={key}>
+      <AppText variant="caption" style={styles.fieldLabel}>{label.toUpperCase()}</AppText>
+      <AppInput value={String(form[key] ?? '')} onChangeText={(value) => setForm((current) => ({ ...current, [key]: value }))} placeholder={placeholder} accessibilityLabel={label} keyboardType={options.keyboardType} maxLength={options.maxLength} />
     </View>
   );
 
   return (
     <Screen>
-
+      <PageTitle title="Delivery Addresses" />
       {!formOpen && <Button title="+ Add address" onPress={openAdd} />}
-      {loading ? <View style={{ paddingVertical: 60, alignItems: 'center' }}><ActivityIndicator size="large" color={colors.green} /><Text style={{ color: colors.inkSoft, marginTop: 12 }}>Loading addresses…</Text></View> : formOpen ? (
-        <View style={{ backgroundColor: colors.panel, borderRadius: 14, borderWidth: 1, borderColor: colors.lineSoft, padding: 16, marginTop: 14 }}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={{ color: colors.ink, fontSize: 18, fontWeight: '900' }}>{editing ? 'Edit delivery address' : 'Add delivery address'}</Text><Pressable onPress={() => setFormOpen(false)}><Text style={{ color: colors.inkSoft, fontWeight: '800' }}>Cancel</Text></Pressable></View>
-          <Text style={{ color: colors.inkSoft, fontSize: 12, fontWeight: '700', marginTop: 18 }}>LABEL</Text>
-          <View style={{ flexDirection: 'row', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>{labels.map((label) => <Pressable key={label} onPress={() => setForm((current) => ({ ...current, label }))} style={{ borderWidth: 1, borderColor: form.label === label ? colors.green : colors.line, backgroundColor: form.label === label ? colors.greenTint : '#fff', borderRadius: 999, paddingHorizontal: 13, paddingVertical: 8 }}><Text style={{ color: form.label === label ? colors.greenDark : colors.inkSoft, fontWeight: '800', fontSize: 12 }}>{label}</Text></Pressable>)}</View>
+      {loading ? <LoadingState label="Loading addresses…" /> : formOpen ? (
+        <AppCard style={styles.formCard}>
+          <View style={styles.formHeader}>
+            <Text style={styles.formTitle}>{editing ? 'Edit delivery address' : 'Add delivery address'}</Text>
+            <TextAction label="Cancel" tone="muted" onPress={() => setFormOpen(false)} />
+          </View>
+          <Text style={styles.labelHeading}>LABEL</Text>
+          <View style={styles.labelChips}>{labels.map((label) => <Chip key={label} label={label} selected={form.label === label} onPress={() => setForm((current) => ({ ...current, label }))} />)}</View>
           {field('Name', 'name', 'Full name')}
           {field('Mobile number', 'mobileNumber', '10-digit mobile number', { keyboardType: 'numeric', maxLength: 10 })}
           {field('Address line 1', 'addressLine1', 'Flat, building, street')}
@@ -120,22 +123,45 @@ export default function CustomerAddressesScreen() {
           {field('City', 'city', 'City')}
           {field('State', 'state', 'State')}
           {field('Pincode', 'pincode', '6-digit pincode', { keyboardType: 'numeric', maxLength: 6 })}
-          <View style={{ marginTop: 20 }}><Button title={saving ? 'Saving…' : editing ? 'Save changes' : 'Add address'} onPress={save} /></View>
-        </View>
+          <View style={styles.saveAction}><Button title={saving ? 'Saving…' : editing ? 'Save changes' : 'Add address'} onPress={save} /></View>
+        </AppCard>
       ) : addresses.length === 0 ? (
-        <View style={{ backgroundColor: colors.panel, borderRadius: 14, borderWidth: 1, borderColor: colors.lineSoft, padding: 24, marginTop: 14, alignItems: 'center' }}><Text style={{ color: colors.ink, fontSize: 17, fontWeight: '900' }}>No saved addresses</Text><Text style={{ color: colors.inkSoft, marginTop: 7, textAlign: 'center' }}>Add a delivery address to continue with checkout.</Text></View>
+        <AppCard style={styles.emptyCard}>
+          <Text style={styles.emptyTitle}>No saved addresses</Text>
+          <Text style={styles.emptyMessage}>Add a delivery address to continue with checkout.</Text>
+        </AppCard>
       ) : addresses.map((address, index) => (
-        <View key={address.id} style={{ backgroundColor: colors.panel, borderRadius: 14, borderWidth: 1, borderColor: index === 0 ? colors.green : colors.lineSoft, padding: 16, marginTop: 14 }}>
-          {index === 0 && <Text style={{ color: colors.green, fontSize: 11, fontWeight: '900', marginBottom: 7 }}>DEFAULT ADDRESS</Text>}
-          <Text style={{ color: colors.ink, fontSize: 16, fontWeight: '900' }}>{address.label || 'Address'}</Text>
-          <Text style={{ color: colors.inkSoft, marginTop: 8, lineHeight: 20 }}>{addressLines(address).join('\n')}</Text>
-          <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
-            <Pressable onPress={() => openEdit(address)} style={{ borderWidth: 1, borderColor: colors.line, borderRadius: 9, paddingHorizontal: 14, paddingVertical: 9 }}><Text style={{ color: colors.greenDark, fontWeight: '800' }}>Edit</Text></Pressable>
-            {index !== 0 && <Pressable onPress={() => makeDefault(address.id)} style={{ borderWidth: 1, borderColor: colors.line, borderRadius: 9, paddingHorizontal: 14, paddingVertical: 9 }}><Text style={{ color: colors.inkSoft, fontWeight: '800' }}>Set default</Text></Pressable>}
-            <Pressable onPress={() => removeAddress(address)} style={{ borderWidth: 1, borderColor: colors.line, borderRadius: 9, paddingHorizontal: 14, paddingVertical: 9 }}><Text style={{ color: colors.danger, fontWeight: '800' }}>Delete</Text></Pressable>
+        <AppCard key={address.id} style={[styles.addressCard, index === 0 && styles.defaultCard]}>
+          {index === 0 && <Text style={styles.defaultBadge}>DEFAULT ADDRESS</Text>}
+          <Text style={styles.addressLabel}>{address.label || 'Address'}</Text>
+          <Text style={styles.addressLines}>{addressLines(address).join('\n')}</Text>
+          <View style={styles.actions}>
+            <TextAction bordered label="Edit" accessibilityLabel={`Edit ${address.label || 'address'}`} onPress={() => openEdit(address)} />
+            {index !== 0 && <TextAction bordered tone="muted" label="Set default" accessibilityLabel={`Set ${address.label || 'address'} as default`} onPress={() => makeDefault(address.id)} />}
+            <TextAction bordered tone="danger" label="Delete" accessibilityLabel={`Delete ${address.label || 'address'}`} onPress={() => removeAddress(address)} />
           </View>
-        </View>
+        </AppCard>
       ))}
     </Screen>
   );
 }
+
+const styles = StyleSheet.create({
+  field: { marginTop: 14 },
+  fieldLabel: { color: colors.inkSoft, fontWeight: '900', marginBottom: 7 },
+  formCard: { marginTop: 14 },
+  formHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  formTitle: { flex: 1, color: colors.ink, fontSize: 18, fontWeight: '900' },
+  labelHeading: { color: colors.inkSoft, fontSize: 12, fontWeight: '700', marginTop: spacing.md },
+  labelChips: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm, flexWrap: 'wrap' },
+  saveAction: { marginTop: spacing.xl },
+  emptyCard: { marginTop: 14, alignItems: 'center', padding: spacing.xxl },
+  emptyTitle: { color: colors.ink, fontSize: 17, fontWeight: '900' },
+  emptyMessage: { color: colors.inkSoft, marginTop: 7, textAlign: 'center' },
+  addressCard: { marginTop: 14, marginBottom: 0 },
+  defaultCard: { borderColor: colors.green },
+  defaultBadge: { color: colors.greenDark, fontSize: 11, fontWeight: '900', marginBottom: 7 },
+  addressLabel: { color: colors.ink, fontSize: 16, fontWeight: '900' },
+  addressLines: { color: colors.inkSoft, marginTop: spacing.sm, lineHeight: 20 },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 14 },
+});

@@ -10,18 +10,26 @@
     "web": "expo start --web",
     "postinstall": "patch-package",
     "typecheck": "tsc --noEmit",
+    "test:regression": "EXPO_PUBLIC_FIREBASE_API_KEY=test-api-key EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN=demo.example.com EXPO_PUBLIC_FIREBASE_PROJECT_ID=demo-project EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET=demo-project.appspot.com EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=123456789 EXPO_PUBLIC_FIREBASE_APP_ID=1:123456789:web:deadbeef EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID=G-TEST tsx --test tests/functional-gap-regressions.test.ts",
+    "check:architecture": "node scripts/check-mobile-api-boundary.cjs",
     "generate:image-map": "node scripts/generate-image-map.cjs"
   },
   "dependencies": {
+    "@expo/ui": "~57.0.21",
     "@expo/vector-icons": "^15.1.1",
+    "@react-native-async-storage/async-storage": "^2.2.0",
+    "@react-native-firebase/app": "26.4.0",
+    "@react-native-firebase/auth": "26.4.0",
+    "@react-native-firebase/firestore": "26.4.0",
+    "@react-native-firebase/messaging": "26.4.0",
     "expo": "~57.0.2",
     "expo-constants": "~57.0.15",
+    "expo-image-picker": "~57.0.20",
     "expo-linking": "~57.0.8",
     "expo-router": "^57.0.16",
     "expo-sqlite": "57.0.2",
     "expo-status-bar": "~57.0.1",
     "firebase": "^12.18.0",
-    "nativewind": "^4.2.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.3",
@@ -31,12 +39,13 @@
     "react-native-screens": "~4.26.0",
     "react-native-web": "^0.21.2",
     "react-native-worklets": "0.10.1",
-    "tailwindcss": "^3.4.17",
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@types/node": "^22.10.2",
     "@types/react": "~19.2.2",
     "patch-package": "^8.0.0",
+    "tsx": "^4.20.6",
     "typescript": "~6.0.3"
   },
   "expo": {

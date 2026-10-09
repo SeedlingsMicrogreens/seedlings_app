@@ -1,59 +1,56 @@
-import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
-import { signInAnonymously } from 'firebase/auth';
-import { auth, db } from '../firebase';
-
-const CUSTOMERS_COLLECTION = 'customers';
+import { mergeGuestCartIntoCustomer } from './cart/cartPersistence';
+import { confirmCustomerOtp, requestCustomerOtp, type CustomerOtpRequest } from './auth/customerPhoneAuth';
+import { getDatabase } from '../storage/sqlite';
 
 export function normalizeIndianMobile(value: string): string {
-  const digits = value.replace(/\D/g, '');
+  const digits = String(value || '').replace(/\D/g, '');
   return digits.length === 10 ? digits : '';
 }
 
-/**
- * Ensures the Firebase client has an authenticated identity before accessing
- * customer data. The current OTP is intentionally static; real phone auth
- * will replace this flow later.
- */
-async function ensureAnonymousAuth() {
-  if (auth.currentUser) return auth.currentUser;
-  const credential = await signInAnonymously(auth);
-  return credential.user;
+export function getStoredCustomerMobile(): string | null {
+  const row = getDatabase().getFirstSync<{ value: string }>(
+    'SELECT value FROM app_meta WHERE key = ?',
+    'customer_mobile',
+  );
+  const mobile = row?.value ? normalizeIndianMobile(row.value) : null;
+  return mobile || null;
 }
 
 /**
- * Finds the customer by the normalized mobile number. The mobile number is
- * also the deterministic document id, preventing duplicate customer records.
- * Returns whether this was a new onboarding record.
+ * Request a server-generated 4-digit OTP. The server owns OTP generation,
+ * expiry, invalidation and SMS delivery.
  */
-export async function ensureClientOnboarding(mobile: string) {
+export async function requestClientOtp(
+  mobile: string,
+  forceResend = false,
+): Promise<CustomerOtpRequest> {
   const normalizedMobile = normalizeIndianMobile(mobile);
-  if (!normalizedMobile) {
-    throw new Error('Invalid mobile number.');
+  if (!normalizedMobile) throw new Error('Invalid mobile number.');
+
+  return requestCustomerOtp(normalizedMobile, forceResend);
+}
+
+/**
+ * Verify the server OTP, establish the Firebase Custom Token session, and
+ * merge the pre-login guest cart into the authenticated customer scope.
+ * Customer/Firebase identity creation is server-owned.
+ */
+export async function ensureClientOnboarding(
+  mobile: string,
+  otp: string,
+): Promise<{ customerId: string; isNew: boolean }> {
+  const normalizedMobile = normalizeIndianMobile(mobile);
+  if (!normalizedMobile) throw new Error('Invalid mobile number.');
+
+  const firebaseUser = await confirmCustomerOtp(otp);
+  if (!firebaseUser.uid) {
+    throw new Error('Customer authentication identity could not be established.');
   }
 
-  await ensureAnonymousAuth();
-
-  const customerRef = doc(db, CUSTOMERS_COLLECTION, normalizedMobile);
-  const existing = await getDoc(customerRef);
-
-  if (existing.exists()) {
-    return {
-      customerId: existing.id,
-      isNew: false,
-    };
-  }
-
-  await setDoc(customerRef, {
-    mobile: normalizedMobile,
-    countryCode: '+91',
-    phoneE164: `+91${normalizedMobile}`,
-    onboardingStatus: 'active',
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
+  mergeGuestCartIntoCustomer(normalizedMobile);
 
   return {
-    customerId: customerRef.id,
-    isNew: true,
+    customerId: normalizedMobile,
+    isNew: false,
   };
 }

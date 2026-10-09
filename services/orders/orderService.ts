@@ -1,5 +1,5 @@
-import { addDoc, collection, doc, getDoc, getDocs, query, where, serverTimestamp } from 'firebase/firestore';
-import { db } from '../core/firebaseClient';
+import { addDoc, collection, doc, getDoc, getDocs, query, where, serverTimestamp } from '../core/firestore';
+import { auth, db } from '../core/firebaseClient';
 import { normalizeIndianMobile } from '../clientOnboarding';
 import type { CartItem } from '../cart/cartService';
 import type { CustomerAddress } from '../customerAddresses';
@@ -18,6 +18,8 @@ function createOrderNumber() {
 export async function createCustomerOneTimeOrder(input: CreateCustomerOrderInput) {
   const mobile = normalizeIndianMobile(input.mobile);
   if (!mobile) throw new Error('Invalid customer mobile number.');
+  const authUid = auth.currentUser?.uid;
+  if (!authUid) throw new Error('Your login session expired. Please sign in again.');
   if (!input.items.length) throw new Error('Your cart is empty.');
   if (!input.deliverySlot?.trim()) throw new Error('Please select a weekend delivery slot.');
 
@@ -83,6 +85,7 @@ export async function createCustomerOneTimeOrder(input: CreateCustomerOrderInput
   const shortageAvailabilityGrams = availabilityResults.reduce((sum, result) => sum + result.shortageGrams, 0);
 
   const order = stripUndefined({
+    authUid,
     orderNumber: createOrderNumber(),
     customerId: mobile,
     customerName: typeof customer.name === 'string' ? customer.name.trim() : '',
@@ -143,6 +146,9 @@ export type CustomerOrder = {
   paymentMethod?: string;
   status?: string;
   deliveryStatus?: string;
+  deliveryPartnerId?: string;
+  assignedDeliveryPartnerId?: string;
+  statusHistory?: Array<Record<string, unknown>>;
   deliveryAddress?: Record<string, unknown>;
   deliveryAddressSnapshot?: Record<string, unknown>;
   orderType?: string;

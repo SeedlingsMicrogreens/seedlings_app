@@ -1,7 +1,8 @@
 import Constants from 'expo-constants';
-import { getIdToken } from 'firebase/auth';
+import { getCustomerIdToken } from '../core/customerAuth';
 import { Platform } from 'react-native';
 import { auth } from '../core/firebaseClient';
+import { clearPendingPaymentAttempt, getPendingPaymentAttempt, savePendingPaymentAttempt } from './paymentAttemptStore';
 import {
   CFPaymentGatewayService,
   type CFCallback,
@@ -11,6 +12,7 @@ import {
   CFEnvironment,
   CFSession,
 } from 'cashfree-pg-api-contract';
+import { normalizePaymentOrderIds } from './paymentOrderIdUtils';
 
 export const CUSTOMER_PAYMENT_METHODS = ['UPI', 'Card', 'Wallet'] as const;
 export type CustomerPaymentMethod = (typeof CUSTOMER_PAYMENT_METHODS)[number];
@@ -33,6 +35,13 @@ export type CashfreePaymentSession = {
   paymentSessionId: string;
   amount: number;
 };
+
+class PaymentApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'PaymentApiError';
+  }
+}
 
 export type CashfreeVerificationResult = {
   status: 'paid' | 'failed' | 'pending';
@@ -65,7 +74,7 @@ async function getFirebaseIdToken(): Promise<string> {
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeout = setTimeout(() => reject(new Error('Customer authentication is taking too long. Please log in again and retry.')), AUTH_TOKEN_TIMEOUT_MS);
     });
-    return await Promise.race([getIdToken(user, true), timeoutPromise]);
+    return await Promise.race([getCustomerIdToken(true), timeoutPromise]);
   } finally {
     if (timeout) clearTimeout(timeout);
   }
@@ -106,7 +115,7 @@ async function callPaymentApi<T>(path: string, body: Record<string, unknown>): P
         payload && typeof payload === 'object' && 'error' in payload
           ? String((payload as { error?: unknown }).error ?? '')
           : '';
-      throw new Error(message || `Payment service request failed (${response.status}).`);
+      throw new PaymentApiError(message || `Payment service request failed (${response.status}).`, response.status);
     }
 
     return payload as T;
@@ -123,11 +132,16 @@ async function callPaymentApi<T>(path: string, body: Record<string, unknown>): P
   }
 }
 
+/**
+ * Single Cashfree session entry point for one-time, subscription, and mixed
+ * checkouts. A mixed checkout MUST pass every internal order ID here so the
+ * Website creates one gateway order covering the complete payment attempt.
+ */
 export async function createCashfreePaymentSession(
   orderIds: string[],
   customerMobile: string,
 ): Promise<CashfreePaymentSession> {
-  const uniqueOrderIds = [...new Set(orderIds.filter(Boolean))];
+  const uniqueOrderIds = normalizePaymentOrderIds(orderIds);
   if (!uniqueOrderIds.length) {
     throw new Error('No pending order was created for payment.');
   }
@@ -154,18 +168,52 @@ export async function createCashfreePaymentSession(
   };
 }
 
+export async function persistCashfreePaymentAttempt(input: {
+  paymentAttemptId: string;
+  cashfreeOrderId?: string;
+  orderIds: string[];
+  primaryOrderId: string;
+  primaryOrderNumber: string;
+  total: number;
+}) {
+  await savePendingPaymentAttempt({ ...input, createdAt: Date.now() });
+}
+
 export async function verifyCashfreePayment(
-  cashfreeOrderId: string,
+  cashfreeOrderId?: string,
 ): Promise<CashfreeVerificationResult> {
-  if (!cashfreeOrderId) {
+  // The persisted payment attempt is the Mobile recovery source when the
+  // native SDK/return path does not provide an order ID.
+  const resolvedOrderId = cashfreeOrderId || (await getPendingPaymentAttempt())?.cashfreeOrderId;
+  if (!resolvedOrderId) {
     throw new Error('Cashfree order ID is missing.');
   }
 
-  console.log('[Cashfree][Verify] requesting server-side payment verification');
-  const result = await callPaymentApi<CashfreeVerificationResult>(
-    '/api/cashfree/verify-payment',
-    { cashfreeOrderId },
-  );
+  console.log(`[Cashfree][Verify] requesting server-side payment verification for ${resolvedOrderId}`);
+  let result: CashfreeVerificationResult;
+  try {
+    result = await callPaymentApi<CashfreeVerificationResult>(
+      '/api/cashfree/verify-payment',
+      {
+        // Keep both names for compatibility with the existing Website endpoint
+        // contract while using one canonical Cashfree order ID value.
+        cashfreeOrderId: resolvedOrderId,
+        orderId: resolvedOrderId,
+      },
+    );
+  } catch (error) {
+    // A verification-server failure cannot be interpreted as payment failure.
+    // Keep the attempt recoverable so the webhook/server can remain authoritative.
+    if (error instanceof PaymentApiError && error.status >= 500) {
+      console.warn(`[Cashfree][Verify] server unavailable status=${error.status}; keeping payment unresolved`);
+      return {
+        status: 'pending',
+        orderId: resolvedOrderId,
+        message: 'We are still confirming your payment. Please check again shortly.',
+      };
+    }
+    throw error;
+  }
 
   console.log(`[Cashfree][Verify] server status=${result.status}`);
 
@@ -214,15 +262,7 @@ export async function startCashfreePayment(
       console.warn('[Cashfree][SDK] callback timeout; checking server-side payment status');
       try {
         const result = await verifyCashfreePayment(session.cashfreeOrderId);
-        finish(() => {
-          if (result.status === 'paid') {
-            resolve(result);
-          } else if (result.status === 'pending') {
-            reject(new Error('Cashfree checkout did not return a payment result. Payment is still pending. Please verify the payment status before trying again.'));
-          } else {
-            reject(new Error(result.message || 'Cashfree checkout did not return a payment result. Payment failed.'));
-          }
-        });
+        finish(() => resolve(result));
       } catch {
         finish(() => reject(new Error('Cashfree checkout did not return a payment result. Please check your payment status before trying again.')));
       }
@@ -230,8 +270,10 @@ export async function startCashfreePayment(
 
     const callback: CFCallback = {
       onVerify: (orderID: string) => {
-        console.log('[Cashfree][SDK] onVerify callback received');
-        void verifyCashfreePayment(orderID || session.cashfreeOrderId)
+        console.log(`[Cashfree][SDK] onVerify callback received orderID=${orderID || '(missing)'}`);
+        // Always verify the order ID persisted before opening Cashfree. The
+        // callback value is treated only as a signal that payment completed.
+        void verifyCashfreePayment(session.cashfreeOrderId)
           .then((result) => {
             finish(() => resolve(result));
           })
@@ -240,22 +282,24 @@ export async function startCashfreePayment(
           });
       },
       onError: (error: CFErrorResponse, orderID: string) => {
-        const message = error?.getMessage?.() || 'Cashfree payment failed.';
-        console.warn(`[Cashfree][SDK] onError callback received: ${message}`);
-        void verifyCashfreePayment(orderID || session.cashfreeOrderId)
+        const gatewayMessage = error?.getMessage?.() || 'Payment could not be completed.';
+        console.warn(`[Cashfree][SDK] onError callback received orderID=${orderID || '(missing)'}: ${gatewayMessage}`);
+        // SDK error callbacks are signals only. Always ask the server for the
+        // authoritative order/payment state before presenting a final result.
+        void verifyCashfreePayment(session.cashfreeOrderId)
           .then((result) => {
-            finish(() => {
-              if (result.status === 'paid') {
-                resolve(result);
-              } else if (result.status === 'pending') {
-                reject(new Error('Payment is still pending. Please verify the payment status before trying again.'));
-              } else {
-                reject(new Error(message));
-              }
-            });
+            if (result.status === 'pending' && !result.message) {
+              result.message = gatewayMessage;
+            }
+            finish(() => resolve(result));
           })
           .catch(() => {
-            finish(() => reject(new Error(message)));
+            // Do not convert an unresolved server state into a false failure.
+            finish(() => resolve({
+              status: 'pending',
+              orderId: session.cashfreeOrderId,
+              message: 'We are still confirming your payment. Please check again shortly.',
+            }));
           });
       },
     };
@@ -278,6 +322,14 @@ export async function startCashfreePayment(
       finish(() => reject(error instanceof Error ? error : new Error('Unable to open Cashfree checkout.')));
     }
   });
+}
+
+export async function reconcileCashfreePayment(cashfreeOrderId: string) {
+  const result = await verifyCashfreePayment(cashfreeOrderId);
+  if (result.status === 'paid' || result.status === 'failed') {
+    await clearPendingPaymentAttempt();
+  }
+  return result;
 }
 
 export function prettyPaymentStatus(status?: string) {

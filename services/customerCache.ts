@@ -12,6 +12,8 @@ export type CachedCustomerRecord = {
   phone?: string;
   status?: string;
   onboardingStatus?: string;
+  photoUrl?: string;
+  profilePhotoUrl?: string;
   addresses?: unknown[];
 };
 

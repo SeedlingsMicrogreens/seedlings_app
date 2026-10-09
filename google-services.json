@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "694969011092",
+    "project_id": "seedlingsmicrogreenwebsite",
+    "storage_bucket": "seedlingsmicrogreenwebsite.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:694969011092:android:e396ffdd067d39942a9d81",
+        "android_client_info": {
+          "package_name": "com.seedlingsmicrogreens.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAQVmGnQXTo8zJn9z4ZsPBMJWioxM_aXiY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

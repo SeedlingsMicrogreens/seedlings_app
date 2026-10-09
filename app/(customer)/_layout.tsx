@@ -1,11 +1,15 @@
 import { Stack, usePathname } from 'expo-router';
-import { Pressable, Text, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useEffect, useState } from 'react';
-import { useBackNavigation } from '../backNavigation';
+import { useBackNavigation } from '../../components/backNavigation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { colors } from '../../constants/theme';
+import { colors, layout, spacing, typography } from '../../constants/theme';
+import { AppText } from '../../components/UI';
 import { getCustomerAddresses } from '../../services/customerAddresses';
 import { useAppStore } from '../../store/appStore';
+
+const ROOT_TAB_PATHS = new Set(['/', '/products', '/cart', '/orders', '/profile']);
 
 function CustomerHeader() {
   const { handleBack } = useBackNavigation();
@@ -14,16 +18,8 @@ function CustomerHeader() {
   const mobile = useAppStore((state) => state.mobile);
   const [addressLabel, setAddressLabel] = useState('Add delivery address');
 
-  const rootTabPaths = [
-    '/(customer)/(tabs)',
-    '/(customer)/(tabs)/',
-    '/(customer)/(tabs)/index',
-    '/(customer)/(tabs)/products',
-    '/(customer)/(tabs)/cart',
-    '/(customer)/(tabs)/orders',
-    '/(customer)/(tabs)/profile',
-  ];
-  const isRootTab = rootTabPaths.includes(pathname);
+  // usePathname() returns URL paths without route groups, e.g. '/cart' for (customer)/(tabs)/cart.
+  const isRootTab = ROOT_TAB_PATHS.has(pathname);
 
   useEffect(() => {
     let alive = true;
@@ -50,18 +46,18 @@ function CustomerHeader() {
   }, [mobile]);
 
   return (
-    <View style={[styles.header, { paddingTop: insets.top, height: 62 + insets.top }]}>
+    <View style={[styles.header, { paddingTop: insets.top, height: layout.headerHeight + insets.top }]}>
       <View style={styles.left}>
         {!isRootTab ? (
-          <Pressable accessibilityRole="button" accessibilityLabel="Go back" onPress={handleBack} style={styles.backButton}>
-            <Text style={styles.backText}>‹</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Go back" onPress={handleBack} hitSlop={4} style={styles.backButton}>
+            <MaterialCommunityIcons name="chevron-left" size={30} color={colors.ink} />
           </Pressable>
         ) : null}
-        <Text style={styles.brand}>Seedlings</Text>
+        <AppText variant="h2" style={styles.brand} maxFontSizeMultiplier={typography.controlMaxFontScale}>Seedlings</AppText>
       </View>
       <View style={styles.delivery}>
-        <Text style={styles.deliveryCaption}>DELIVER TO</Text>
-        <View style={styles.deliveryRow}><Text style={styles.pin}>⌖</Text><Text style={styles.deliveryValue} numberOfLines={1}>{addressLabel}</Text><Text style={styles.chevron}>⌄</Text></View>
+        <AppText variant="caption" style={styles.deliveryCaption} maxFontSizeMultiplier={typography.controlMaxFontScale}>DELIVER TO</AppText>
+        <View style={styles.deliveryRow}><MaterialCommunityIcons name="map-marker-outline" size={13} color={colors.greenDark} style={styles.pin} /><AppText variant="bodySmall" style={styles.deliveryValue} numberOfLines={1} maxFontSizeMultiplier={typography.controlMaxFontScale}>{addressLabel}</AppText><MaterialCommunityIcons name="chevron-down" size={14} color={colors.inkSoft} style={styles.chevron} /></View>
       </View>
     </View>
   );
@@ -69,37 +65,44 @@ function CustomerHeader() {
 
 export default function CustomerLayout() {
   const authenticated = useAppStore((state) => state.authenticated);
+  const insets = useSafeAreaInsets();
 
   return (
     <View style={styles.shell}>
       {authenticated ? <CustomerHeader /> : null}
-      <View style={styles.content}>
+      <View style={[styles.content, authenticated && { paddingTop: layout.headerHeight + insets.top }]}>
         <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colors.paper } }} />
       </View>
     </View>
   );
 }
 
-const styles = {
+const styles = StyleSheet.create({
   shell: { flex: 1, backgroundColor: colors.paper },
   content: { flex: 1 },
   header: {
-    flexDirection: 'row' as const,
-    alignItems: 'center' as const,
-    justifyContent: 'space-between' as const,
-    paddingHorizontal: 16,
+    zIndex: 100,
+    elevation: 4,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: layout.headerHeight,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: layout.screenHorizontal,
     backgroundColor: colors.paper,
     borderBottomWidth: 1,
     borderBottomColor: colors.lineSoft,
   },
-  left: { flexDirection: 'row' as const, alignItems: 'center' as const, flex: 1 },
-  backButton: { width: 32, height: 40, alignItems: 'flex-start' as const, justifyContent: 'center' as const, marginRight: 2 },
-  backText: { fontSize: 36, lineHeight: 40, color: colors.ink },
-  brand: { fontFamily: 'System', fontSize: 21, fontWeight: '900' as const, color: colors.greenDark, letterSpacing: -0.3 },
-  delivery: { alignItems: 'flex-end' as const, maxWidth: '52%' as const },
-  deliveryCaption: { fontFamily: 'System', fontSize: 9, color: colors.inkSoft, fontWeight: '800' as const, letterSpacing: 0.7 },
-  deliveryRow: { flexDirection: 'row' as const, alignItems: 'center' as const, marginTop: 2, maxWidth: '100%' as const },
-  pin: { fontFamily: 'System', color: colors.greenDark, fontSize: 13, marginRight: 3 },
-  deliveryValue: { fontFamily: 'System', fontSize: 11, fontWeight: '900' as const, color: colors.ink, flexShrink: 1 },
-  chevron: { fontFamily: 'System', color: colors.inkSoft, fontSize: 13, marginLeft: 2 },
-};
+  left: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  backButton: { width: layout.minTouch, height: layout.minTouch, alignItems: 'flex-start', justifyContent: 'center', marginLeft: -spacing.sm, marginRight: 2 },
+  brand: { fontSize: 21, fontWeight: '900', color: colors.greenDark, letterSpacing: -0.3 },
+  delivery: { alignItems: 'flex-end', maxWidth: '52%' },
+  deliveryCaption: { fontSize: 9, color: colors.inkSoft, fontWeight: '800', letterSpacing: 0.7 },
+  deliveryRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2, maxWidth: '100%' },
+  pin: { marginRight: 3 },
+  deliveryValue: { fontSize: 11, fontWeight: '900', color: colors.ink, flexShrink: 1 },
+  chevron: { marginLeft: 2 },
+});

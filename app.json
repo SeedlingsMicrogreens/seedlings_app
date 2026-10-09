@@ -15,6 +15,7 @@
       "bundleIdentifier": "com.seedlingsmicrogreens.app"
     },
     "android": {
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#FAF7F1"
@@ -26,7 +27,11 @@
     },
     "plugins": [
       "expo-router",
-      "expo-status-bar"
+      "expo-status-bar",
+      "@react-native-firebase/app",
+      "@react-native-firebase/auth",
+      "@react-native-firebase/messaging",
+      "expo-image-picker"
     ],
     "extra": {
       "router": {},
