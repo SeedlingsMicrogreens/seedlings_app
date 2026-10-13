@@ -16,6 +16,7 @@ import {
   type CartScope,
 } from '../services/cart/cartPersistence';
 import { replaceProductCartSelectionInCart, type CartItem, type SubscriptionCartItem, type UnifiedCart } from '../services/cart/cartService';
+import { parseWeightGrams } from '../services/orders/weightUtils';
 
 const guestScope: CartScope = { kind: 'guest' };
 
@@ -55,16 +56,16 @@ type State = {
   hydrateCart: () => void;
   hydrateSession: () => Promise<void>;
   addToCart: (product: Product, weight?: string) => void;
-  addSubscriptionToCart: (product: Product, plan: { id: string; name?: string; frequency?: string; deliveriesPerTerm?: number; price?: number; deliveryChargeMode?: string; deliveryCharge?: number; sellingOptionId?: string; sellingOptionLabel?: string; weightGrams?: number }, startDate: string, quantity?: number) => void;
+  addSubscriptionToCart: (product: Product, plan: { id: string; name?: string; frequency?: string; deliveriesPerTerm?: number; price?: number; maximumPlanPrice?: number; deliveryChargeMode?: string; deliveryCharge?: number; sellingOptionId?: string; sellingOptionLabel?: string; weightGrams?: number }, startDate: string, quantity?: number) => void;
   setCartPackaging: (productId: string, weightGrams: number, price: number, mrp: number, sellingOptionId?: string, sellingOptionLabel?: string) => void;
-  setSubscriptionCartPackaging: (productId: string, planId: string, startDate: string, weightGrams: number, price: number, sellingOptionId?: string, sellingOptionLabel?: string) => void;
+  setSubscriptionCartPackaging: (productId: string, planId: string, startDate: string, weightGrams: number, price: number, sellingOptionId?: string, sellingOptionLabel?: string, maximumPlanPrice?: number) => void;
   removeFromCart: (id: string, weight?: string) => void;
   removeSubscriptionFromCart: (productId: string, planId: string, startDate: string) => void;
   changeQuantity: (id: string, delta: number, weight?: string) => void;
   changeSubscriptionQuantity: (productId: string, planId: string, startDate: string, delta: number) => void;
   clearCart: () => void;
   refreshCartProducts: (products: Product[]) => void;
-  replaceProductCartSelection: (input: { product: Product; mode: 'one-time' | 'subscription'; quantity: number; plan?: { id: string; name?: string; frequency?: string; deliveriesPerTerm?: number; price?: number; sellingOptionId?: string; sellingOptionLabel?: string; weightGrams?: number; deliveryChargeMode?: string; deliveryCharge?: number }; startDate?: string }) => void;
+  replaceProductCartSelection: (input: { product: Product; mode: 'one-time' | 'subscription'; quantity: number; plan?: { id: string; name?: string; frequency?: string; deliveriesPerTerm?: number; price?: number; maximumPlanPrice?: number; sellingOptionId?: string; sellingOptionLabel?: string; weightGrams?: number; deliveryChargeMode?: string; deliveryCharge?: number }; startDate?: string }) => void;
   applyCartDeliveryDates: (dates: Record<string, string | null>) => void;
 };
 
@@ -133,20 +134,29 @@ export const useAppStore = create<State>((set, get) => ({
 
   addToCart: (product, weight) => {
     const defaultOption = getDefaultOneTimeSellingOption(product);
-    const explicitWeightGrams = Number.parseFloat(String(weight ?? '').replace(/[^\d.]/g, ''));
+    const explicitWeightGrams = parseWeightGrams(weight, Number.NaN);
+    const fallbackWeightGrams = defaultOption?.weightGrams ?? parseWeightGrams(product.defaultWeight, 100);
     const selectedWeightGrams = Number.isFinite(explicitWeightGrams) && explicitWeightGrams > 0
       ? explicitWeightGrams
-      : ((defaultOption?.weightGrams ?? Number.parseInt(String(product.defaultWeight ?? '').replace(/[^\d.]/g, ''), 10)) || 100);
+      : (fallbackWeightGrams || 100);
     const selectedWeight = selectedWeightGrams >= 1000 && selectedWeightGrams % 1000 === 0 ? `${selectedWeightGrams / 1000}kg` : `${selectedWeightGrams}g`;
     const selectedOption = (product.sellingOptions ?? []).find((option) => option.active !== false && option.weightGrams === selectedWeightGrams)
       ?? (Number.isFinite(explicitWeightGrams) && explicitWeightGrams > 0 ? (product.sellingOptions ?? []).find((option) => option.active !== false && Math.abs(option.weightGrams - selectedWeightGrams) < 0.01) : undefined)
       ?? defaultOption;
     const scope = scopeFor(get());
     const existing = get().cart.find((item) => item.id === product.id);
+    const selectedOptionValues = selectedOption ? {
+      price: selectedOption.price,
+      mrp: selectedOption.mrp,
+      sellingOptionId: selectedOption.id,
+      sellingOptionLabel: `${selectedOption.weightGrams >= 1000 && selectedOption.weightGrams % 1000 === 0 ? `${selectedOption.weightGrams / 1000}kg` : `${selectedOption.weightGrams}g`} box`,
+      selectedWeight,
+    } : {};
     if (existing) {
-      const updated = get().cart.map((item) => item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item);
+      const updated = get().cart.map((item) => item.id === product.id ? { ...item, ...selectedOptionValues, quantity: item.quantity + 1 } : item);
+      const next = updated.find((item) => item.id === product.id);
+      if (next) upsertCartItem(scope, next);
       set({ cart: updated });
-      const next = updated.find((item) => item.id === product.id); if (next) upsertCartItem(scope, next);
       return;
     }
     const item: CartItem = {
@@ -154,9 +164,10 @@ export const useAppStore = create<State>((set, get) => ({
       quantity: 1,
       cartPosition: nextCartPosition(get()),
       selectedWeight,
-      ...(selectedOption ? { price: selectedOption.price, mrp: selectedOption.mrp, sellingOptionId: selectedOption.id, sellingOptionLabel: `${selectedOption.weightGrams >= 1000 && selectedOption.weightGrams % 1000 === 0 ? `${selectedOption.weightGrams / 1000}kg` : `${selectedOption.weightGrams}g`} box` } : {}),
+      ...selectedOptionValues,
     };
-    set((state) => ({ cart: [...state.cart, item] })); upsertCartItem(scope, item);
+    upsertCartItem(scope, item);
+    set((state) => ({ cart: [...state.cart, item] }));
   },
 
   addSubscriptionToCart: (product, plan, startDate, quantity = 1) => {
@@ -165,17 +176,36 @@ export const useAppStore = create<State>((set, get) => ({
     const scope = scopeFor(get());
     const existing = get().subscriptionCart.find((item) => item.id === product.id && item.planId === planId && item.startDate === startDate);
     if (existing) {
-      const updated = get().subscriptionCart.map((item) => item.id === product.id && item.planId === planId && item.startDate === startDate ? { ...item, quantity: item.quantity + normalizedQuantity } : item);
+      const selectedPrice = Number(plan.price ?? product.price ?? 0);
+      const selectedWeight = Number(plan.weightGrams) > 0
+        ? (Number(plan.weightGrams) >= 1000 && Number(plan.weightGrams) % 1000 === 0 ? `${Number(plan.weightGrams) / 1000}kg` : `${Number(plan.weightGrams)}g`)
+        : product.defaultWeight;
+      const referencePrice = Number(plan.maximumPlanPrice);
+      const updated = get().subscriptionCart.map((item) =>
+        item.id === product.id && item.planId === planId && item.startDate === startDate
+          ? {
+              ...item,
+              quantity: item.quantity + normalizedQuantity,
+              selectedWeight,
+              price: selectedPrice,
+              mrp: Number.isFinite(referencePrice) ? referencePrice : selectedPrice,
+              ...(plan.sellingOptionId ? { sellingOptionId: plan.sellingOptionId } : {}),
+              ...(plan.sellingOptionLabel ? { sellingOptionLabel: plan.sellingOptionLabel } : {}),
+            }
+          : item);
+      const next = updated.find((item) => item.id === product.id && item.planId === planId && item.startDate === startDate);
+      if (next) upsertSubscriptionCartItem(scope, next);
       set({ subscriptionCart: updated });
-      const next = updated.find((item) => item.id === product.id && item.planId === planId && item.startDate === startDate); if (next) upsertSubscriptionCartItem(scope, next);
       return;
     }
     const subscriptionPrice = Number(plan.price ?? product.price ?? 0);
     const selectedWeight = Number(plan.weightGrams) > 0
       ? (Number(plan.weightGrams) >= 1000 && Number(plan.weightGrams) % 1000 === 0 ? `${Number(plan.weightGrams) / 1000}kg` : `${Number(plan.weightGrams)}g`)
       : product.defaultWeight;
-    const item: SubscriptionCartItem = { ...product, quantity: normalizedQuantity, cartPosition: nextCartPosition(get()), selectedWeight, price: subscriptionPrice, mrp: subscriptionPrice, planId, planName: plan.name || 'Subscription', ...(plan.sellingOptionId ? { sellingOptionId: plan.sellingOptionId } : {}), ...(plan.sellingOptionLabel ? { sellingOptionLabel: plan.sellingOptionLabel } : {}), ...(plan.frequency ? { frequency: plan.frequency } : {}), ...(Number.isFinite(Number(plan.deliveriesPerTerm)) ? { deliveriesPerTerm: Number(plan.deliveriesPerTerm) } : {}), ...(plan.deliveryChargeMode ? { deliveryChargeMode: plan.deliveryChargeMode } : {}), ...(Number.isFinite(Number(plan.deliveryCharge)) ? { deliveryCharge: Number(plan.deliveryCharge) } : {}), startDate };
-    set((state) => ({ subscriptionCart: [...state.subscriptionCart, item] })); upsertSubscriptionCartItem(scope, item);
+    const referencePrice = Number(plan.maximumPlanPrice);
+    const item: SubscriptionCartItem = { ...product, quantity: normalizedQuantity, cartPosition: nextCartPosition(get()), selectedWeight, price: subscriptionPrice, mrp: Number.isFinite(referencePrice) ? referencePrice : subscriptionPrice, planId, planName: plan.name || 'Subscription', ...(plan.sellingOptionId ? { sellingOptionId: plan.sellingOptionId } : {}), ...(plan.sellingOptionLabel ? { sellingOptionLabel: plan.sellingOptionLabel } : {}), ...(plan.frequency ? { frequency: plan.frequency } : {}), ...(Number.isFinite(Number(plan.deliveriesPerTerm)) ? { deliveriesPerTerm: Number(plan.deliveriesPerTerm) } : {}), ...(plan.deliveryChargeMode ? { deliveryChargeMode: plan.deliveryChargeMode } : {}), ...(Number.isFinite(Number(plan.deliveryCharge)) ? { deliveryCharge: Number(plan.deliveryCharge) } : {}), startDate };
+    upsertSubscriptionCartItem(scope, item);
+    set((state) => ({ subscriptionCart: [...state.subscriptionCart, item] }));
   },
 
   setCartPackaging: (productId, weightGrams, price, mrp, sellingOptionId, sellingOptionLabel) => {
@@ -186,9 +216,9 @@ export const useAppStore = create<State>((set, get) => ({
     if (next) upsertCartItem(scope, next);
   },
 
-  setSubscriptionCartPackaging: (productId, planId, startDate, weightGrams, price, sellingOptionId, sellingOptionLabel) => {
+  setSubscriptionCartPackaging: (productId, planId, startDate, weightGrams, price, sellingOptionId, sellingOptionLabel, maximumPlanPrice) => {
     const scope = scopeFor(get());
-    const updated = get().subscriptionCart.map((item) => item.id === productId && item.planId === planId && item.startDate === startDate ? { ...item, selectedWeight: weightGrams >= 1000 && weightGrams % 1000 === 0 ? `${weightGrams / 1000}kg` : `${weightGrams}g`, price, mrp: price, ...(sellingOptionId ? { sellingOptionId } : {}), ...(sellingOptionLabel ? { sellingOptionLabel } : {}) } : item);
+    const updated = get().subscriptionCart.map((item) => item.id === productId && item.planId === planId && item.startDate === startDate ? { ...item, selectedWeight: weightGrams >= 1000 && weightGrams % 1000 === 0 ? `${weightGrams / 1000}kg` : `${weightGrams}g`, price, mrp: Number(maximumPlanPrice ?? price), ...(sellingOptionId ? { sellingOptionId } : {}), ...(sellingOptionLabel ? { sellingOptionLabel } : {}) } : item);
     set({ subscriptionCart: updated });
     const next = updated.find((item) => item.id === productId && item.planId === planId && item.startDate === startDate);
     if (next) upsertSubscriptionCartItem(scope, next);

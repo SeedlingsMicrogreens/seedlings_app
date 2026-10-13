@@ -50,15 +50,6 @@ export default function Home() {
       <MaterialCommunityIcons name="sprout" size={92} color={colors.white} style={styles.heroLeaf} />
     </View>
 
-    <View style={styles.quickRow}>
-      <Pressable accessibilityRole="button" accessibilityLabel="One Time: Fresh this weekend" onPress={() => router.push('/(customer)/(tabs)/products')} style={[styles.quickCard, styles.quickGreen]}>
-        <Text style={styles.quickTitle}>One Time</Text><Text style={styles.quickText}>Fresh this weekend</Text><MaterialCommunityIcons name="arrow-right" size={20} color={colors.greenDark} style={styles.quickArrow} />
-      </Pressable>
-      <Pressable accessibilityRole="button" accessibilityLabel="Subscriptions: Save on every delivery" onPress={() => router.push('/(customer)/account/subscriptions')} style={[styles.quickCard, styles.quickOrange]}>
-        <Text style={[styles.quickTitle, styles.quickTitleOrange]}>Subscriptions</Text><Text style={styles.quickText}>Save on every delivery</Text><MaterialCommunityIcons name="arrow-right" size={20} color={colors.orangeDark} style={styles.quickArrow} />
-      </Pressable>
-    </View>
-
     <SectionHeader title="Popular Products" action="View all" onAction={() => router.push('/(customer)/(tabs)/products')} />
     {!productsLoaded ? <LoadingState label="Loading fresh products…" /> : null}
     <View style={styles.grid}>{popular.slice(0, 4).map(p => <ProductCard key={p.id} product={p} onPress={() => router.push({ pathname: '/(customer)/product/[id]', params: { id: p.id } })} />)}</View>
@@ -78,13 +69,5 @@ const styles = StyleSheet.create({
   heroButtonPressed: { opacity: 0.82 },
   heroButtonText: { fontFamily: typography.fontFamily, color: colors.greenDeep, fontSize: 12, fontWeight: '900' },
   heroLeaf: { position: 'absolute', right: -5, bottom: -18, opacity: 0.17 },
-  quickRow: { flexDirection: 'row', gap: 10, marginTop: spacing.md },
-  quickCard: { flex: 1, minHeight: 92, borderRadius: radius.lg, padding: spacing.md, position: 'relative' },
-  quickGreen: { backgroundColor: colors.greenTint },
-  quickOrange: { backgroundColor: colors.orangeTint },
-  quickTitle: { fontFamily: typography.fontFamily, color: colors.greenDark, fontSize: 14, fontWeight: '900' },
-  quickText: { fontFamily: typography.fontFamily, color: colors.inkSoft, fontSize: 11, marginTop: 3, maxWidth: '85%' },
-  quickTitleOrange: { color: colors.orangeDark },
-  quickArrow: { position: 'absolute', right: 12, bottom: 11 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
 });

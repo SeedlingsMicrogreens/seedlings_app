@@ -7,8 +7,22 @@ import type { PaymentTransaction } from '../payments/paymentService';
 import { checkProductAvailability, nextWeekSaturday } from './customerOrderAvailability';
 import { calculateCheckoutDeliveryCharges } from './deliveryChargeService';
 import { stripUndefined } from '../core/firestoreData';
+import type { Product } from '../products/productService';
 
 export type CreateCustomerOrderInput = { mobile: string; items: CartItem[]; address: CustomerAddress; paymentMethod?: 'online'; deliverySlot: string; shortageDecision?: 'continue' | 'contact' };
+
+type OrderSalesProduct = {
+  id: string;
+  active: unknown;
+  sellingPrice: unknown;
+  mrp?: unknown;
+  components: Product['components'];
+  sku?: unknown;
+  type?: unknown;
+  name?: unknown;
+  slug?: unknown;
+  imageUrl?: unknown;
+};
 
 function createOrderNumber() {
   const now = new Date();
@@ -32,14 +46,39 @@ export async function createCustomerOneTimeOrder(input: CreateCustomerOrderInput
   if (!selectedAddress) throw new Error('Selected delivery address is no longer available.');
 
   const productDocs = await getDocs(collection(db, 'salesProducts'));
-  const products = new Map(productDocs.docs.map((s) => [s.id, { id: s.id, ...s.data() }]));
+  const products = new Map(productDocs.docs.map((snapshot) => {
+    const raw = snapshot.data() || {};
+    const components = Array.isArray(raw.components)
+      ? raw.components.map((entry) => {
+          const component = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {};
+          return {
+            productId: String(component.productId ?? ''),
+            productName: String(component.productName ?? ''),
+            ...(typeof component.productSku === 'string' ? { productSku: component.productSku } : {}),
+            quantityGrams: Number(component.quantityGrams || 0),
+          };
+        })
+      : [];
+    const product: OrderSalesProduct = {
+      id: snapshot.id,
+      active: raw.active,
+      sellingPrice: raw.sellingPrice,
+      ...(raw.mrp !== undefined ? { mrp: raw.mrp } : {}),
+      components,
+      sku: raw.sku,
+      type: raw.type,
+      name: raw.name,
+      slug: raw.slug,
+      imageUrl: raw.imageUrl,
+    };
+    return [snapshot.id, product] as const;
+  }));
   const deliveryDate = nextWeekSaturday();
 
   const availabilityResults = await Promise.all(input.items.map(async (item) => {
     const product = products.get(item.id);
     if (!product || product.active !== true) throw new Error(`${item.name} is no longer available.`);
-    if (product.oneTimePurchase !== true) throw new Error(`${item.name} is not available for one-time purchase.`);
-    return checkProductAvailability({ product: product as any, quantity: item.quantity, deliveryDate });
+    return checkProductAvailability({ product, quantity: item.quantity, deliveryDate });
   }));
   const shortage = availabilityResults.some((result) => result.hasShortage);
   if (shortage && !input.shortageDecision) throw new Error('HARVEST_SHORTAGE_CONFIRMATION_REQUIRED');
@@ -47,7 +86,6 @@ export async function createCustomerOneTimeOrder(input: CreateCustomerOrderInput
   const orderItems = input.items.map((item) => {
     const product = products.get(item.id);
     if (!product || product.active !== true) throw new Error(`${item.name} is no longer available.`);
-    if (product.oneTimePurchase !== true) throw new Error(`${item.name} is not available for one-time purchase.`);
     const unitPrice = Number(product.sellingPrice);
     const mrp = Number(product.mrp ?? unitPrice);
     if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error(`Price unavailable for ${item.name}.`);
@@ -128,6 +166,7 @@ export async function createCustomerOneTimeOrder(input: CreateCustomerOrderInput
 
 export type CustomerOrder = {
   id: string;
+  authUid?: string;
   orderNumber?: string;
   customerId: string;
   customerName?: string;
@@ -146,6 +185,7 @@ export type CustomerOrder = {
   paymentMethod?: string;
   status?: string;
   deliveryStatus?: string;
+  deliveryDate?: string;
   deliveryPartnerId?: string;
   assignedDeliveryPartnerId?: string;
   statusHistory?: Array<Record<string, unknown>>;

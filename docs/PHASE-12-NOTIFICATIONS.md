@@ -81,6 +81,9 @@ Notification reads and read-state updates remain protected by Firebase Security 
 - Unread notifications use the existing green semantic palette.
 - Notification actions use the shared Button component where a button is required.
 - Notification cards are touchable across their full surface.
+- The authenticated customer header shows a tappable bell immediately before the existing delivery-address/Pincode section. It reuses `subscribeToCustomerNotifications` and `notificationUnreadCount`; Firestore notification records and their `read` state remain authoritative. The count updates from the live subscription, hides for zero/loading/error, and caps the visible label at `99+`. The bell navigates to the existing `/(customer)/account/notifications` route without changing address selection or navigation.
+- Header badge regressions cover read-state updates, zero unread, counts above 99, invalid/unavailable counts, and the existing Notifications route. No backend, separately maintained unread counter, or second notification feed was added.
+- Status: Implemented, not runtime-verified. Automated validation: `npm run typecheck`, `npm run test:regression` (42 tests), `npm run check:architecture`, and `git diff --check` passed. No device rendering was performed.
 
 ## Definition of Done
 - Notification center loads customer-owned notifications.

@@ -11,6 +11,7 @@ export {
   setDoc,
   writeBatch,
   serverTimestamp,
+  runTransaction,
   onSnapshot,
   getFirestore,
 } from 'firebase/firestore';

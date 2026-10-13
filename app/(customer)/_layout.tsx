@@ -1,12 +1,13 @@
-import { Stack, usePathname } from 'expo-router';
+import { router, Stack, usePathname } from 'expo-router';
 import { Pressable, StyleSheet, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useEffect, useState } from 'react';
 import { useBackNavigation } from '../../components/backNavigation';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, layout, spacing, typography } from '../../constants/theme';
-import { AppText } from '../../components/UI';
+import { AppBadge, AppText } from '../../components/UI';
 import { getCustomerAddresses } from '../../services/customerAddresses';
+import { CUSTOMER_NOTIFICATIONS_ROUTE, notificationUnreadBadgeLabel, notificationUnreadCount, subscribeToCustomerNotifications } from '../../services/notifications/notificationService';
 import { useAppStore } from '../../store/appStore';
 
 const ROOT_TAB_PATHS = new Set(['/', '/products', '/cart', '/orders', '/profile']);
@@ -17,6 +18,7 @@ function CustomerHeader() {
   const pathname = usePathname();
   const mobile = useAppStore((state) => state.mobile);
   const [addressLabel, setAddressLabel] = useState('Add delivery address');
+  const [unreadBadgeLabel, setUnreadBadgeLabel] = useState<string | null>(null);
 
   // usePathname() returns URL paths without route groups, e.g. '/cart' for (customer)/(tabs)/cart.
   const isRootTab = ROOT_TAB_PATHS.has(pathname);
@@ -45,6 +47,27 @@ function CustomerHeader() {
     return () => { alive = false; };
   }, [mobile]);
 
+  useEffect(() => {
+    let alive = true;
+    setUnreadBadgeLabel(null);
+    if (!mobile) return () => { alive = false; };
+
+    const unsubscribe = subscribeToCustomerNotifications(
+      mobile,
+      (items) => {
+        if (alive) setUnreadBadgeLabel(notificationUnreadBadgeLabel(notificationUnreadCount(items)));
+      },
+      () => {
+        if (alive) setUnreadBadgeLabel(null);
+      },
+    );
+
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, [mobile]);
+
   return (
     <View style={[styles.header, { paddingTop: insets.top, height: layout.headerHeight + insets.top }]}>
       <View style={styles.left}>
@@ -55,9 +78,21 @@ function CustomerHeader() {
         ) : null}
         <AppText variant="h2" style={styles.brand} maxFontSizeMultiplier={typography.controlMaxFontScale}>Seedlings</AppText>
       </View>
-      <View style={styles.delivery}>
-        <AppText variant="caption" style={styles.deliveryCaption} maxFontSizeMultiplier={typography.controlMaxFontScale}>DELIVER TO</AppText>
-        <View style={styles.deliveryRow}><MaterialCommunityIcons name="map-marker-outline" size={13} color={colors.greenDark} style={styles.pin} /><AppText variant="bodySmall" style={styles.deliveryValue} numberOfLines={1} maxFontSizeMultiplier={typography.controlMaxFontScale}>{addressLabel}</AppText><MaterialCommunityIcons name="chevron-down" size={14} color={colors.inkSoft} style={styles.chevron} /></View>
+      <View style={styles.deliveryGroup}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={unreadBadgeLabel ? `Notifications, ${unreadBadgeLabel} unread` : 'Notifications'}
+          onPress={() => router.push(CUSTOMER_NOTIFICATIONS_ROUTE)}
+          hitSlop={4}
+          style={styles.notificationButton}
+        >
+          <MaterialCommunityIcons name="bell-outline" size={22} color={colors.greenDark} />
+          {unreadBadgeLabel ? <AppBadge style={styles.notificationBadge}>{unreadBadgeLabel}</AppBadge> : null}
+        </Pressable>
+        <View style={styles.delivery}>
+          <AppText variant="caption" style={styles.deliveryCaption} maxFontSizeMultiplier={typography.controlMaxFontScale}>DELIVER TO</AppText>
+          <View style={styles.deliveryRow}><MaterialCommunityIcons name="map-marker-outline" size={13} color={colors.greenDark} style={styles.pin} /><AppText variant="bodySmall" style={styles.deliveryValue} numberOfLines={1} maxFontSizeMultiplier={typography.controlMaxFontScale}>{addressLabel}</AppText><MaterialCommunityIcons name="chevron-down" size={14} color={colors.inkSoft} style={styles.chevron} /></View>
+        </View>
       </View>
     </View>
   );
@@ -99,7 +134,10 @@ const styles = StyleSheet.create({
   left: { flexDirection: 'row', alignItems: 'center', flex: 1 },
   backButton: { width: layout.minTouch, height: layout.minTouch, alignItems: 'flex-start', justifyContent: 'center', marginLeft: -spacing.sm, marginRight: 2 },
   brand: { fontSize: 21, fontWeight: '900', color: colors.greenDark, letterSpacing: -0.3 },
-  delivery: { alignItems: 'flex-end', maxWidth: '52%' },
+  deliveryGroup: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, maxWidth: '62%', flexShrink: 1 },
+  notificationButton: { width: layout.minTouch, height: layout.minTouch, alignItems: 'center', justifyContent: 'center' },
+  notificationBadge: { position: 'absolute', top: 0, right: 0, borderWidth: 1.5, borderColor: colors.paper },
+  delivery: { alignItems: 'flex-end', flexShrink: 1 },
   deliveryCaption: { fontSize: 9, color: colors.inkSoft, fontWeight: '800', letterSpacing: 0.7 },
   deliveryRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2, maxWidth: '100%' },
   pin: { marginRight: 3 },

@@ -6,7 +6,16 @@ import { useSegments } from 'expo-router';
 import { colors, elevation, layout, radius, spacing, typography } from '../constants/theme';
 import type { Product } from '../services/products/productService';
 import { getDefaultOneTimeSellingOption } from '../services/products/productService';
+import { resolvePriceDisplay } from '../services/products/priceDisplay';
 import { useAppStore } from '../store/appStore';
+
+const money = (value: number, currency = 'INR') => {
+  try {
+    return new Intl.NumberFormat('en-IN', { style: 'currency', currency, maximumFractionDigits: 0 }).format(value);
+  } catch {
+    return `₹${value}`;
+  }
+};
 
 // Shared screen shell. Tab scenes already end above the bottom tab bar (measured on device), so tab screens only
 // add the standard gap; stack screens also reserve the system navigation-bar inset (Android draws edge-to-edge).
@@ -170,10 +179,11 @@ export function ProductCard({ product, onPress }: { product: Product; onPress: (
   const quantity = useAppStore((s) => s.cart.find((item) => item.id === product.id)?.quantity ?? 0);
   const source = product.imageUrl?.startsWith('http') ? { uri: product.imageUrl } : require('../assets/products/placeholder.png');
   const defaultOption = getDefaultOneTimeSellingOption(product);
-  const displayPrice = defaultOption?.price ?? product.price;
-  const displayMrp = defaultOption?.mrp ?? product.mrp;
+  const displayPrice = Number(product.price);
+  const displayMrp = product.mrp;
   const displayWeight = defaultOption?.weightGrams ? (defaultOption.weightGrams >= 1000 && defaultOption.weightGrams % 1000 === 0 ? `${defaultOption.weightGrams / 1000}kg` : `${defaultOption.weightGrams}g`) : product.defaultWeight;
-  const hasDiscount = Boolean(displayMrp && displayMrp > displayPrice);
+  const priceDisplay = resolvePriceDisplay(displayPrice, displayMrp);
+  const hasDiscount = priceDisplay.originalPrice !== undefined;
 
   const add = () => {
     addToCart(product, displayWeight);
@@ -196,8 +206,8 @@ export function ProductCard({ product, onPress }: { product: Product; onPress: (
       </Pressable>
       <View style={styles.priceRow}>
         <View style={styles.priceGroup}>
-          <Text style={styles.price}>₹{displayPrice}</Text>
-          {hasDiscount ? <Text style={styles.mrp}>₹{displayMrp}</Text> : null}
+          {hasDiscount ? <Text style={styles.mrp}>MRP {money(priceDisplay.originalPrice ?? 0, product.currency)}</Text> : null}
+          <Text style={styles.price}>{money(displayPrice, product.currency)}</Text>
         </View>
         {product.oneTimePurchase ? (quantity === 0 ? (
           <Pressable accessibilityRole="button" accessibilityLabel={`Add ${product.name} to cart`} onPress={add} style={styles.addButton}>
@@ -207,7 +217,7 @@ export function ProductCard({ product, onPress }: { product: Product; onPress: (
           <QuantityStepper compact quantity={quantity} onDecrease={decrease} onIncrease={increase} itemLabel={product.name} />
         )) : null}
       </View>
-      {hasDiscount ? <Text style={styles.saving}>Save ₹{Math.max(0, Number(displayMrp) - displayPrice)}</Text> : null}
+      {priceDisplay.savings !== undefined ? <Text style={styles.saving}>Save {money(priceDisplay.savings, product.currency)}</Text> : null}
     </View>
   );
 }

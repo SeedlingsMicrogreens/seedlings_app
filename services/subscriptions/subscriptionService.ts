@@ -5,6 +5,8 @@ import { stripUndefined } from '../core/firestoreData';
 import { buildSubscriptionDeliveryDates, calculateUniqueDateCheckoutDeliveryCharges } from '../orders/deliveryChargeService';
 import { isProductSubscriptionEligible } from '../products/subscriptionEligibility';
 import { getSubscriptionPlanPriceForSellingOption as resolveSubscriptionPlanPriceForSellingOption } from './subscriptionPlanPrice';
+import { filterActivePlansForProduct } from './subscriptionPlanDiscovery';
+import { Alert } from 'react-native';
 
 export type SubscriptionPlanSellingOption = {
   id?: string;
@@ -12,12 +14,13 @@ export type SubscriptionPlanSellingOption = {
   sellingOptionLabel?: string;
   weightGrams?: number;
   planPrice?: number;
+  maximumPlanPrice?: number;
 };
 
 export type SubscriptionPlan = {
   id: string;
   name: string;
-  productId?: string;
+  salableProductId?: string;
   frequency: string;
   price: number;
   sellingOptions?: SubscriptionPlanSellingOption[];
@@ -79,6 +82,7 @@ function normalizeSellingOptions(sellingOptions: unknown) {
         ...(item?.sellingOptionLabel != null ? { sellingOptionLabel: str(item.sellingOptionLabel) } : {}),
         ...(item?.weightGrams != null ? { weightGrams: num(item.weightGrams) } : {}),
         ...(item?.planPrice != null ? { planPrice: num(item.planPrice) } : {}),
+        ...(item?.maximumPlanPrice != null ? { maximumPlanPrice: num(item.maximumPlanPrice) } : {}),
       }))
     : [];
 }
@@ -105,19 +109,15 @@ function resolvePlanSellingOption(product: Record<string, unknown>, plan: Record
 
 export async function getActiveSubscriptionPlans(productId?: string): Promise<SubscriptionPlan[]> {
   const normalizedProductId = String(productId ?? '').trim();
-  const snapshot = normalizedProductId
-    ? await getDocs(query(collection(db, 'subscriptionPlans'), where('salableProductId', '==', normalizedProductId)))
-    : await getDocs(query(collection(db, 'subscriptionPlans'), where('active', '==', true)));
-
-  return snapshot.docs.map((docSnapshot) => {
+  const mapPlan = (docSnapshot: { id: string; data: () => Record<string, unknown> }): SubscriptionPlan => {
     const data = docSnapshot.data();
     const sellingOptions = normalizeSellingOptions(data.sellingOptions);
     return {
       id: docSnapshot.id,
       name: str(data.name, str(data.frequency, 'Subscription plan')),
-      ...(data.salableProductId != null ? { productId: str(data.salableProductId) } : {}),
+      ...(data.salableProductId != null ? { salableProductId: str(data.salableProductId) } : {}),
       frequency: str(data.frequency),
-      price: num(data.price),
+      price: data.price == null ? Number.NaN : num(data.price, Number.NaN),
       ...(sellingOptions.length ? { sellingOptions } : {}),
       ...(data.deliveriesPerTerm != null ? { deliveriesPerTerm: num(data.deliveriesPerTerm) } : {}),
       active: data.active === true,
@@ -125,11 +125,28 @@ export async function getActiveSubscriptionPlans(productId?: string): Promise<Su
       ...(data.deliveryChargeMode ? { deliveryChargeMode: str(data.deliveryChargeMode) } : {}),
       ...(data.deliveryCharge != null ? { deliveryCharge: num(data.deliveryCharge) } : {}),
     };
-  }).sort((a, b) => a.sortOrder - b.sortOrder || a.price - b.price);
+  };
+
+  if (!normalizedProductId) {
+    const snapshot = await getDocs(query(collection(db, 'subscriptionPlans'), where('active', '==', true)));
+    return snapshot.docs.map(mapPlan)
+      .filter((plan) => plan.active === true && Number.isFinite(plan.price) && plan.price >= 0)
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.price - b.price);
+  }
+
+  const exactSnapshot = await getDocs(query(collection(db, 'subscriptionPlans'), where('salableProductId', '==', normalizedProductId)));
+  const exactPlans = filterActivePlansForProduct(exactSnapshot.docs.map(mapPlan), normalizedProductId);
+  const productPlans = exactPlans.length
+    ? exactPlans
+    : filterActivePlansForProduct(
+      (await getDocs(query(collection(db, 'subscriptionPlans'), where('active', '==', true)))).docs.map(mapPlan),
+      normalizedProductId,
+    );
+  return productPlans.sort((a, b) => a.sortOrder - b.sortOrder || a.price - b.price);
 }
 
-export function getSubscriptionPlanPriceForSellingOption(plan: SubscriptionPlan, sellingOptionId?: string): number | undefined {
-  return resolveSubscriptionPlanPriceForSellingOption(plan, sellingOptionId);
+export function getSubscriptionPlanPriceForSellingOption(plan: SubscriptionPlan, sellingOptionId?: string, sellingOptionWeightGrams?: number): number | undefined {
+  return resolveSubscriptionPlanPriceForSellingOption(plan, sellingOptionId, sellingOptionWeightGrams);
 }
 
 export async function getCustomerSubscriptions(input: string): Promise<CustomerSubscription[]> {
@@ -225,9 +242,9 @@ export async function createCustomerSubscription(input: CreateSubscriptionInput)
 
   const product = productSnapshot.data() || {};
   const plan = planSnapshot.data() || {};
-  if (!isProductSubscriptionEligible(product as Record<string, unknown>)) throw new Error('Selected product is not eligible for subscriptions.');
+  if (product.active !== true) throw new Error('Selected product is no longer available.');
   if (plan.active !== true) throw new Error('Selected subscription plan is no longer active.');
-  if (plan.salableProductId != null && String(plan.salableProductId) !== productId) throw new Error('Selected subscription plan does not belong to this product.');
+  if (String(plan.salableProductId ?? '').trim() !== productId) throw new Error('Selected subscription plan does not belong to this product.');
   const startDateObject = new Date(`${startDate}T00:00:00`);
   if (Number.isNaN(startDateObject.getTime()) || startDateObject.getDay() !== 6) throw new Error('Subscription start date must be a Saturday.');
 
@@ -268,7 +285,7 @@ export async function createCustomerSubscription(input: CreateSubscriptionInput)
     salableProductId: productId,
     productId: String(component.productId),
     productName: str(productionSnapshot.data()?.name, str(product.name)),
-    sellingOptionId: selectedSellingOption.sellingOptionId || selectedSellingOption.id || '',
+    sellingOptionId: selectedSellingOption.sellingOptionId || '',
     sellingOptionLabel: selectedSellingOption.sellingOptionLabel || moneyLabel(Number(selectedSellingOption.weightGrams ?? component.quantityGrams ?? 0)),
     weightGrams: Number(selectedSellingOption.weightGrams ?? component.quantityGrams ?? 0),
     unitPrice: selectedSellingOption.price,
@@ -308,7 +325,7 @@ export async function createCustomerSubscription(input: CreateSubscriptionInput)
       salableProductType: product.type === 'multiple' ? 'multiple' : 'single',
       productId: String(component.productId),
       productName: str(productionSnapshot.data()?.name, str(product.name)),
-      sellingOptionId: selectedSellingOption.sellingOptionId || selectedSellingOption.id || '',
+      sellingOptionId: selectedSellingOption.sellingOptionId || '',
       sellingOptionLabel: selectedSellingOption.sellingOptionLabel || moneyLabel(Number(selectedSellingOption.weightGrams ?? component.quantityGrams ?? 0)),
       weightGrams: Number(selectedSellingOption.weightGrams ?? component.quantityGrams ?? 0),
       quantity,
@@ -361,7 +378,7 @@ export async function createCustomerSubscription(input: CreateSubscriptionInput)
     orderId: orderRef.id,
     orderNumber: order.orderNumber,
     paymentAttemptId,
-    sellingOptionId: selectedSellingOption.sellingOptionId || selectedSellingOption.id || '',
+    sellingOptionId: selectedSellingOption.sellingOptionId || '',
     total: Number(order.total ?? 0),
   };
 }

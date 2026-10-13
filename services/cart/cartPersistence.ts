@@ -9,6 +9,7 @@ export type CartScope =
 export type PersistedCartItem = Product & {
   quantity: number;
   selectedWeight: string;
+  cartPosition?: number;
   purchaseMode?: 'one-time' | 'subscription';
   subscriptionPlanId?: string;
   planId?: string;

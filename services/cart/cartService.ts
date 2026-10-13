@@ -1,4 +1,5 @@
 import type { Product } from '../products/productService';
+import { resolvePriceDisplay } from '../products/priceDisplay';
 
 export type CartItem = Product & {
   quantity: number;
@@ -27,6 +28,14 @@ export type UnifiedCart = {
   subscriptionItems: SubscriptionCartItem[];
 };
 
+export function getCartItemCount<T extends { quantity: number }, U extends { quantity: number }>(
+  cart: T[],
+  subscriptionCart: U[],
+): number {
+  return cart.reduce((sum, item) => sum + item.quantity, 0)
+    + subscriptionCart.reduce((sum, item) => sum + item.quantity, 0);
+}
+
 export type CartTotals = {
   mrpSubtotal: number;
   subtotal: number;
@@ -45,6 +54,7 @@ export function replaceProductCartSelectionInCart(input: {
     frequency?: string;
     deliveriesPerTerm?: number;
     price?: number;
+    maximumPlanPrice?: number;
     sellingOptionId?: string;
     sellingOptionLabel?: string;
     weightGrams?: number;
@@ -97,7 +107,7 @@ export function replaceProductCartSelectionInCart(input: {
     cartPosition,
     selectedWeight,
     price: Number(plan.price ?? product.price ?? 0),
-    mrp: Number(plan.price ?? product.price ?? 0),
+    mrp: Number(plan.maximumPlanPrice ?? plan.price ?? 0),
     planId: String(plan.id),
     planName: plan.name || 'Subscription',
     ...(plan.frequency ? { frequency: plan.frequency } : {}),
@@ -111,9 +121,10 @@ export function replaceProductCartSelectionInCart(input: {
 
 export function getUnifiedCartTotals(cart: UnifiedCart): CartTotals {
   const items = [...cart.oneTimeItems, ...cart.subscriptionItems];
-  const mrpSubtotal = items.reduce((sum, item) => sum + (item.mrp && item.mrp > 0 ? item.mrp : item.price) * item.quantity, 0);
   const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const savings = Math.max(0, mrpSubtotal - subtotal);
+  const savings = items.reduce((sum, item) =>
+    sum + (resolvePriceDisplay(item.price, item.mrp).savings ?? 0) * item.quantity, 0);
+  const mrpSubtotal = subtotal + savings;
   return { mrpSubtotal, subtotal, savings, delivery: 0, total: subtotal };
 }
 

@@ -17,8 +17,6 @@ Home may provide:
 - Product search/navigation
 - Featured/popular products
 - Product discovery
-- One-time shopping entry point
-- Subscription entry point
 - Navigation to the complete product catalogue
 - Navigation to Product Details
 
@@ -31,12 +29,12 @@ Home
   ├── Greeting
   ├── Search
   ├── Featured promotional area
-  ├── One-Time entry
-  ├── Subscription entry
   └── Popular/featured products
           ↓
       Product Details / Products
 ```
+
+The Home screen must not render the One Time or Subscriptions promotional entry blocks. This is a Home presentation change only: preserve the product catalogue, navigation tabs, and existing one-time ordering and subscription functionality and routes.
 
 ## 4. Product Cache Rule
 
@@ -92,13 +90,11 @@ Included:
 - Greeting
 - Search/navigation
 - Featured/promotional content already supported by the current Mobile source
-- One-time entry
-- Subscription entry
 - Popular/featured product discovery
 - Product cache behavior used by Home
 
 Not included:
-
+- One Time and Subscriptions promotional entry blocks on Home (removed by this requirement)
 - Full Product Catalogue implementation
 - Product Detail implementation
 - Cart business-rule changes
@@ -118,7 +114,9 @@ For Phase 2, this document is updated before implementation. Any change that alt
 - Home loads without Website API dependency.
 - Customer greeting works when profile data is available.
 - Product discovery navigates correctly.
-- One-time and subscription entry points navigate correctly.
+- Home does not display the One Time or Subscriptions promotional entry blocks.
+- One-time ordering and subscription functionality remain available through their existing app flows.
+- Product listings, navigation tabs, authentication, checkout, payment processing, and other Home sections remain unchanged.
 - Product cache is used for up to one day.
 - No unnecessary background product refresh occurs on every Home mount.
 - Home does not implement order/threshold/payment business rules.

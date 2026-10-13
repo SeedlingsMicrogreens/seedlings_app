@@ -7,6 +7,7 @@ import { getCustomerOrder, type CustomerOrder } from '../../../services/orders/o
 import { useAppStore } from '../../../store/appStore';
 import { createCashfreePaymentSession, paymentStatusMessage, persistCashfreePaymentAttempt, prettyPaymentStatus, startCashfreePayment, type PaymentTransaction } from '../../../services/payments/paymentService';
 import { clearPendingPaymentAttempt } from '../../../services/payments/paymentAttemptStore';
+import { auth } from '../../../services/core/firebaseClient';
 
 function money(value: unknown) {
   const n = Number(value ?? 0);
@@ -110,6 +111,10 @@ export default function OrderDetail() {
     if (!order || !mobile || retrying) return;
     setRetrying(true);
     try {
+      const authUid = auth.currentUser?.uid;
+      if (!authUid || order.authUid !== authUid) {
+        throw new Error('This order does not belong to the signed-in customer session. Sign in to the account used for this order.');
+      }
       const orderIds = [String(order.id)].filter(Boolean);
       const attemptId = String((order as CustomerOrder & { paymentAttemptId?: unknown }).paymentAttemptId || `retry-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
       const totalAmount = Number(order.totalAmount ?? order.total ?? 0);
@@ -131,7 +136,7 @@ export default function OrderDetail() {
       });
       const result = await startCashfreePayment(session);
       if (result.status === 'paid') {
-        await clearPendingPaymentAttempt();
+        await clearPendingPaymentAttempt(attemptId);
         router.replace({ pathname: '/(customer)/checkout/success', params: { orderNumber: String(order.orderNumber || order.id), total: String(session.amount || totalAmount) } });
         return;
       }

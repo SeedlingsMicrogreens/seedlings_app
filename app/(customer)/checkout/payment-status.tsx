@@ -25,10 +25,9 @@ export default function PaymentStatus() {
       setStatus(result.status);
       if (result.status === 'paid') {
         useAppStore.getState().clearCart();
-        await clearPendingPaymentAttempt();
+        await clearPendingPaymentAttempt(attempt.paymentAttemptId);
         setMessage('Payment received and your order has been placed.');
       } else if (result.status === 'failed') {
-        await clearPendingPaymentAttempt();
         setMessage(result.message || 'Payment was not completed. Your cart is still available for retry.');
       } else {
         setMessage('Payment is still pending. Please check again shortly.');
@@ -52,6 +51,7 @@ export default function PaymentStatus() {
         </Text>
         <View style={[styles.messageBox, failed && styles.messageBoxFailed]}><Text style={[styles.message, failed && styles.messageFailed]}>{message}</Text></View>
         {!loading && status === 'pending' ? <View style={styles.action}><Button title="Check Again" onPress={() => void check()} /></View> : null}
+        {!loading && (status === 'pending' || status === 'failed') ? <View style={styles.action}><Button title="Resume Checkout" onPress={() => router.replace('/(customer)/checkout')} /></View> : null}
         {!loading && status === 'paid' ? <View style={styles.action}><Button title="View My Orders" onPress={() => router.replace('/(customer)/(tabs)/orders')} /></View> : null}
         {!loading && status === 'failed' ? <View style={styles.action}><Button title="Return to Cart" onPress={() => router.replace('/(customer)/(tabs)/cart')} /></View> : null}
         {!loading && status === 'missing' ? <View style={styles.action}><Button title="Continue Shopping" onPress={() => router.replace('/(customer)/(tabs)/products')} /></View> : null}

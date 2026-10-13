@@ -43,6 +43,41 @@ export type UniqueDateCheckoutDeliveryCharges = {
   chargePerDate: number;
 };
 
+export type CheckoutDeliveryChargeGroup = {
+  label: string;
+  deliveryCount: number;
+};
+
+export function allocateUniqueDeliveryDateChargeGroups(input: {
+  oneTimeDates: string[];
+  subscriptions: Array<{ label: string; deliveryDates: string[] }>;
+}): { oneTimeDeliveryCount: number; subscriptions: CheckoutDeliveryChargeGroup[] } {
+  const chargedDates = new Set<string>();
+  const claimDates = (dates: string[]) => {
+    const uniqueDates = new Set(dates.filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date)));
+    let count = 0;
+    uniqueDates.forEach((date) => {
+      if (chargedDates.has(date)) return;
+      chargedDates.add(date);
+      count += 1;
+    });
+    return count;
+  };
+  const oneTimeDeliveryCount = claimDates(input.oneTimeDates);
+  const subscriptions = input.subscriptions.map(({ label, deliveryDates }) => ({
+    label,
+    deliveryCount: claimDates(deliveryDates),
+  }));
+  return { oneTimeDeliveryCount, subscriptions };
+}
+
+export class UnserviceablePincodeError extends Error {
+  constructor(readonly pincode: string) {
+    super(`Pincode ${pincode} is not currently serviceable.`);
+    this.name = 'UnserviceablePincodeError';
+  }
+}
+
 export type DeliveryChargeSubscriptionInput = {
   planId: string;
   planName?: string;
@@ -103,7 +138,7 @@ export async function calculateUniqueDateCheckoutDeliveryCharges(input: {
     throw new Error(`Multiple active geolocations are configured for pincode ${pincode}.`);
   }
   if (matches.length === 0) {
-    throw new Error(`Pincode ${pincode} is not currently serviceable. Please contact us for assistance.`);
+    throw new UnserviceablePincodeError(pincode);
   }
 
   const geoDoc = matches[0];

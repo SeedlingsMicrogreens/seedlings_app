@@ -16,6 +16,8 @@ export type CustomerNotification = {
   subscriptionId?: string;
 };
 
+export const CUSTOMER_NOTIFICATIONS_ROUTE = '/(customer)/account/notifications' as const;
+
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -113,6 +115,11 @@ export function notificationCreatedAt(item: CustomerNotification): number {
 
 export function notificationUnreadCount(items: CustomerNotification[]): number {
   return items.reduce((count, item) => count + (item.read ? 0 : 1), 0);
+}
+
+export function notificationUnreadBadgeLabel(count: number): string | null {
+  if (!Number.isFinite(count) || count <= 0) return null;
+  return count > 99 ? '99+' : String(count);
 }
 
 export async function registerCustomerPushToken(mobile: string, token: string): Promise<void> {

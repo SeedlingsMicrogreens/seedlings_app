@@ -45,11 +45,14 @@ class PaymentApiError extends Error {
 
 export type CashfreeVerificationResult = {
   status: 'paid' | 'failed' | 'pending';
+  inProgress?: boolean;
   orderId?: string;
   amount?: number;
   transactionId?: string;
   message?: string;
 };
+
+const paymentSessionRequests = new Map<string, Promise<CashfreePaymentSession>>();
 
 function getWebsiteApiBaseUrl(): string {
   const value = process.env.EXPO_PUBLIC_WEBSITE_API_URL?.trim().replace(/\/$/, '');
@@ -137,35 +140,47 @@ async function callPaymentApi<T>(path: string, body: Record<string, unknown>): P
  * checkouts. A mixed checkout MUST pass every internal order ID here so the
  * Website creates one gateway order covering the complete payment attempt.
  */
-export async function createCashfreePaymentSession(
+export function createCashfreePaymentSession(
   orderIds: string[],
   customerMobile: string,
 ): Promise<CashfreePaymentSession> {
   const uniqueOrderIds = normalizePaymentOrderIds(orderIds);
   if (!uniqueOrderIds.length) {
-    throw new Error('No pending order was created for payment.');
+    return Promise.reject(new Error('No pending order was created for payment.'));
   }
 
-  console.log(`[Cashfree][Checkout] requesting payment session for ${uniqueOrderIds.length} order(s)`);
-  const result = await callPaymentApi<Partial<CashfreePaymentSession>>(
-    '/api/cashfree/create-payment-session',
-    {
-      orderIds: uniqueOrderIds,
-      customerMobile,
-    },
+  const requestKey = `${customerMobile}:${uniqueOrderIds.join(',')}`;
+  const activeRequest = paymentSessionRequests.get(requestKey);
+  if (activeRequest) return activeRequest;
+
+  const request = (async () => {
+    console.log(`[Cashfree][Checkout] requesting payment session for ${uniqueOrderIds.length} order(s)`);
+    const result = await callPaymentApi<Partial<CashfreePaymentSession>>(
+      '/api/cashfree/create-payment-session',
+      {
+        orderIds: uniqueOrderIds,
+        customerMobile,
+      },
+    );
+
+    if (!result.cashfreeOrderId || !result.paymentSessionId) {
+      throw new Error('Cashfree payment session was not created.');
+    }
+
+    console.log('[Cashfree][Checkout] payment session received');
+
+    return {
+      cashfreeOrderId: result.cashfreeOrderId,
+      paymentSessionId: result.paymentSessionId,
+      amount: Number(result.amount ?? 0),
+    };
+  })();
+  paymentSessionRequests.set(requestKey, request);
+  void request.then(
+    () => { if (paymentSessionRequests.get(requestKey) === request) paymentSessionRequests.delete(requestKey); },
+    () => { if (paymentSessionRequests.get(requestKey) === request) paymentSessionRequests.delete(requestKey); },
   );
-
-  if (!result.cashfreeOrderId || !result.paymentSessionId) {
-    throw new Error('Cashfree payment session was not created.');
-  }
-
-  console.log('[Cashfree][Checkout] payment session received');
-
-  return {
-    cashfreeOrderId: result.cashfreeOrderId,
-    paymentSessionId: result.paymentSessionId,
-    amount: Number(result.amount ?? 0),
-  };
+  return request;
 }
 
 export async function persistCashfreePaymentAttempt(input: {
@@ -175,8 +190,11 @@ export async function persistCashfreePaymentAttempt(input: {
   primaryOrderId: string;
   primaryOrderNumber: string;
   total: number;
+  createdAt?: number;
+  checkoutFingerprint?: string;
+  authUid?: string;
 }) {
-  await savePendingPaymentAttempt({ ...input, createdAt: Date.now() });
+  await savePendingPaymentAttempt({ ...input, createdAt: input.createdAt || Date.now() });
 }
 
 export async function verifyCashfreePayment(
@@ -326,8 +344,11 @@ export async function startCashfreePayment(
 
 export async function reconcileCashfreePayment(cashfreeOrderId: string) {
   const result = await verifyCashfreePayment(cashfreeOrderId);
-  if (result.status === 'paid' || result.status === 'failed') {
-    await clearPendingPaymentAttempt();
+  if (result.status === 'paid') {
+    const attempt = await getPendingPaymentAttempt();
+    if (attempt?.cashfreeOrderId === cashfreeOrderId) {
+      await clearPendingPaymentAttempt(attempt.paymentAttemptId);
+    }
   }
   return result;
 }

@@ -63,7 +63,8 @@ export async function confirmCustomerOtp(code: string): Promise<CustomerAuthUser
     }
 
     const { auth } = await import('../core/firebaseClient');
-    const credential = await auth.signInWithCustomToken(result.customToken);
+    const { signInWithCustomToken } = await import('firebase/auth');
+    const credential = await signInWithCustomToken(auth, result.customToken);
     return {
       uid: credential.user.uid,
       phoneNumber: credential.user.phoneNumber ?? null,

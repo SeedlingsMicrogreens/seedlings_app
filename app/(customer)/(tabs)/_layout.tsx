@@ -4,6 +4,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, elevation, layout, typography } from '../../../constants/theme';
 import { AppBadge } from '../../../components/UI';
+import { getCartItemCount } from '../../../services/cart/cartService';
 import { useAppStore } from '../../../store/appStore';
 
 const tabIcons = {
@@ -33,7 +34,7 @@ function TabIcon({ routeName, active, badge }: { routeName: keyof typeof tabIcon
 
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
-  const cartCount = useAppStore((s) => s.cart.reduce((sum, item) => sum + item.quantity, 0) + s.subscriptionCart.reduce((sum, item) => sum + item.quantity, 0));
+  const cartCount = useAppStore((s) => getCartItemCount(s.cart, s.subscriptionCart));
   const tabBarHeight = layout.tabBarHeight + insets.bottom;
 
   return (

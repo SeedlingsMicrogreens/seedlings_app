@@ -7,15 +7,20 @@ import { useAppStore } from '../../../store/appStore';
 import { getUnifiedCartTotals, type CartItem, type SubscriptionCartItem } from '../../../services/cart/cartService';
 import { getCustomerAddresses, type CustomerAddress } from '../../../services/customerAddresses';
 import { nextWeekSaturday, resolveCartDeliveryDates, shouldSubmitAvailabilityEnquiry } from '../../../services/orders/customerOrderAvailability';
-import { calculateUniqueDateCheckoutDeliveryCharges, buildSubscriptionDeliveryDates, type UniqueDateCheckoutDeliveryCharges } from '../../../services/orders/deliveryChargeService';
+import { allocateUniqueDeliveryDateChargeGroups, calculateUniqueDateCheckoutDeliveryCharges, buildSubscriptionDeliveryDates, UnserviceablePincodeError, type UniqueDateCheckoutDeliveryCharges } from '../../../services/orders/deliveryChargeService';
 import { getCachedProducts, getProducts } from '../../../services/products/productService';
-import { createCustomerMixedCheckout } from '../../../services/orders/mixedCheckoutService';
+import { assertPaymentAttemptOwnership, createCustomerMixedCheckout } from '../../../services/orders/mixedCheckoutService';
 import { submitHighDemandEnquiries } from '../../../services/orders/customerEnquiryService';
-import { submitAvailabilityContactRequest } from '../../../services/orders/customerContactRequestService';
-import { createCashfreePaymentSession, persistCashfreePaymentAttempt, startCashfreePayment } from '../../../services/payments/paymentService';
-import { clearPendingPaymentAttempt, getPendingPaymentAttempt } from '../../../services/payments/paymentAttemptStore';
-import { calculateCustomerOffers, type CheckoutOfferResult } from '../../../services/orders/customerOffers';
+import { submitAvailabilityContactRequest, submitUnserviceablePincodeEnquiry } from '../../../services/orders/customerContactRequestService';
+import { createCashfreePaymentSession, persistCashfreePaymentAttempt, startCashfreePayment, verifyCashfreePayment } from '../../../services/payments/paymentService';
+import { clearPendingPaymentAttempt, getOrCreatePendingPaymentAttempt, getPendingPaymentAttempt, type PendingPaymentAttempt } from '../../../services/payments/paymentAttemptStore';
+import { allocateOfferSavings, calculateCheckoutPayableDeliveryCharge, calculateCheckoutPayableProductSubtotal, calculateCheckoutPayableTotal, calculateCustomerOffers, type CheckoutOfferResult, type SubscriptionDeliveryEntitlement } from '../../../services/orders/customerOffers';
+import { checkoutSavingsBreakdown, formatCheckoutAmount } from '../../../services/orders/checkoutSavings';
+import { resolvePriceDisplay, scalePriceDisplay } from '../../../services/products/priceDisplay';
 import { parseWeightGrams } from '../../../services/orders/weightUtils';
+import { buildCheckoutFingerprint, declinedAvailabilityEnquiryId } from '../../../services/orders/checkoutAttemptUtils';
+import { saveEnquiriesBeforeRemovingItems } from '../../../services/orders/declinedDeliveryEnquiry';
+import { auth } from '../../../services/core/firebaseClient';
 
 const CHECKOUT_VALIDATION_TIMEOUT_MS = 30_000;
 
@@ -24,7 +29,7 @@ function formatAddress(address: CustomerAddress) {
 }
 
 function money(value: number) {
-  return `₹${Math.round(Number(value) || 0)}`;
+  return formatCheckoutAmount(Number(value) || 0);
 }
 
 function formatDeliveryDate(value: string) {
@@ -35,6 +40,20 @@ function formatDeliveryDate(value: string) {
 
 function weightLabel(item: CartItem) {
   return item.selectedWeight || 'Pack';
+}
+
+function regularDeliveriesFor(item: SubscriptionCartItem) {
+  const configured = Number(item.deliveriesPerTerm);
+  if (Number.isSafeInteger(configured) && configured > 0) return configured;
+  const frequency = String(item.frequency ?? '').toLowerCase();
+  return frequency === 'monthly' ? 4 : frequency === 'quarterly' ? 12 : 1;
+}
+
+function deliverySlotForCart(cart: CartItem[], subscriptions: SubscriptionCartItem[]) {
+  return [
+    ...cart.map((item) => item.deliveryDate || nextWeekSaturday()),
+    ...subscriptions.map((item) => item.deliveryDate || item.startDate || nextWeekSaturday()),
+  ].sort()[0] || nextWeekSaturday();
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -66,13 +85,17 @@ export default function Checkout() {
   const [loadingAddresses, setLoadingAddresses] = useState(true);
   const [addressError, setAddressError] = useState('');
   const [validationError, setValidationError] = useState('');
+  const [unserviceablePincode, setUnserviceablePincode] = useState('');
+  const [pincodeEnquiryError, setPincodeEnquiryError] = useState('');
+  const [submittingPincodeEnquiry, setSubmittingPincodeEnquiry] = useState(false);
   const [validating, setValidating] = useState(false);
   const [deliveryCharges, setDeliveryCharges] = useState<UniqueDateCheckoutDeliveryCharges | null>(null);
   const [chargeLoading, setChargeLoading] = useState(true);
   const [checkoutLines, setCheckoutLines] = useState<CheckoutLine[]>([]);
   const [offerResult, setOfferResult] = useState<CheckoutOfferResult>({ priceSavings: 0, oneTimePriceSavings: 0, subscriptionPriceSavings: 0, deliverySavings: 0, totalSavings: 0 });
-  const paymentAttemptId = useRef(`pay-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
+  const [subscriptionEntitlements, setSubscriptionEntitlements] = useState<SubscriptionDeliveryEntitlement[]>([]);
   const paymentInFlight = useRef(false);
+  const pincodeEnquiryInFlight = useRef(false);
 
   const loadAddresses = useCallback(async () => {
     if (!mobile) return;
@@ -112,6 +135,10 @@ export default function Checkout() {
     const pincode = String(selected?.pincode ?? '').replace(/\D/g, '');
     setChargeLoading(true);
     setDeliveryCharges(null);
+    setOfferResult({ priceSavings: 0, oneTimePriceSavings: 0, subscriptionPriceSavings: 0, deliverySavings: 0, totalSavings: 0 });
+    setSubscriptionEntitlements([]);
+    setUnserviceablePincode('');
+    setPincodeEnquiryError('');
     setCheckoutLines(buildCheckoutLines(cart, subscriptionCart));
     if (!/^\d{6}$/.test(pincode)) {
       setChargeLoading(false);
@@ -123,17 +150,39 @@ export default function Checkout() {
         pincode,
         oneTimeDates: cart.map((item) => item.deliveryDate || nextWeekSaturday()),
         subscriptionDates: subscriptionCart.flatMap((item) =>
-          buildSubscriptionDeliveryDates(item.deliveryDate || item.startDate || nextWeekSaturday(), Number(item.deliveriesPerTerm) || 1),
+          buildSubscriptionDeliveryDates(item.deliveryDate || item.startDate || nextWeekSaturday(), regularDeliveriesFor(item)),
         ),
       });
       const oneTimeSubtotal = cart.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 0), 0);
       const subscriptionSubtotal = subscriptionCart.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 0), 0);
-      const offers = await calculateCustomerOffers({ pincode, oneTimeSubtotal, subscriptionSubtotal, oneTimeDelivery: result.total });
+      const geoId = result.charges[0]?.sourceId ?? '';
+      const locationName = result.charges[0]?.sourceName ?? '';
+      const offers = await calculateCustomerOffers({
+        pincode,
+        geoId,
+        locationName,
+        oneTimeSubtotal,
+        subscriptionSubtotal,
+        deliveryChargeAmounts: result.charges.map((charge) => charge.charge),
+        subscriptions: subscriptionCart.map((item) => ({
+          frequency: item.frequency ?? '',
+          regularDeliveries: regularDeliveriesFor(item),
+          pincode,
+          geoId,
+          locationName,
+        })),
+      });
       setCheckoutLines(lines);
       setDeliveryCharges(result);
       setOfferResult(offers);
+      setSubscriptionEntitlements(offers.subscriptionEntitlements);
     } catch (error) {
-      setValidationError(error instanceof Error ? error.message : 'Unable to calculate delivery charges.');
+      if (error instanceof UnserviceablePincodeError) {
+        setUnserviceablePincode(error.pincode);
+        setValidationError('');
+      } else {
+        setValidationError(error instanceof Error ? error.message : 'Unable to calculate delivery charges.');
+      }
     } finally {
       setChargeLoading(false);
     }
@@ -142,13 +191,101 @@ export default function Checkout() {
   useEffect(() => { void loadDeliveryCharge(); }, [loadDeliveryCharge]);
 
   const selectedAddress = addresses.find((item) => item.id === selectedAddressId);
-  const finalDeliveryCharge = Math.max(0, Number(deliveryCharges?.total ?? 0) - (subscriptionCart.length > 0 ? 0 : offerResult.deliverySavings));
-  const checkoutTotal = Math.max(0, totals.subtotal - offerResult.priceSavings) + finalDeliveryCharge;
+  const payableProductSubtotal = calculateCheckoutPayableProductSubtotal(totals.subtotal, offerResult.priceSavings);
+  const finalDeliveryCharge = calculateCheckoutPayableDeliveryCharge(deliveryCharges?.total ?? 0, offerResult.deliverySavings);
+  const checkoutTotal = calculateCheckoutPayableTotal(totals.subtotal, deliveryCharges?.total ?? 0, offerResult);
+  const deliveryChargeGroups = allocateUniqueDeliveryDateChargeGroups({
+    oneTimeDates: cart.map((item) => item.deliveryDate || nextWeekSaturday()),
+    subscriptions: subscriptionCart.map((item) => ({
+      label: item.planName || item.frequency || 'Subscription',
+      deliveryDates: buildSubscriptionDeliveryDates(
+        item.deliveryDate || item.startDate || nextWeekSaturday(),
+        regularDeliveriesFor(item),
+      ),
+    })),
+  });
+
+  const completePaidAttempt = async (attemptId: string, orderNumber: string, total: number) => {
+    useAppStore.getState().clearCart();
+    await clearPendingPaymentAttempt(attemptId);
+    router.replace({ pathname: '/(customer)/checkout/success', params: { orderNumber, total: String(total) } });
+  };
+
+  const continuePaymentAttempt = async (attempt: PendingPaymentAttempt) => {
+    await assertPaymentAttemptOwnership(attempt, mobile);
+    if (attempt.cashfreeOrderId) {
+      const verification = await verifyCashfreePayment(attempt.cashfreeOrderId);
+      if (verification.status === 'paid') {
+        await completePaidAttempt(attempt.paymentAttemptId, attempt.primaryOrderNumber, attempt.total);
+        return;
+      }
+      if (verification.status === 'pending') {
+        if (verification.inProgress) {
+          router.replace('/(customer)/checkout/payment-status');
+          return;
+        }
+      }
+    }
+
+    const session = await createCashfreePaymentSession(attempt.orderIds, mobile);
+    if (Math.round(session.amount) !== Math.round(attempt.total)) {
+      throw new Error(`Payment amount mismatch. Checkout total is ${money(attempt.total)} but Cashfree received ${money(session.amount)}.`);
+    }
+    await persistCashfreePaymentAttempt({
+      ...attempt,
+      cashfreeOrderId: session.cashfreeOrderId,
+      total: session.amount || attempt.total,
+    });
+
+    const paymentResult = await startCashfreePayment(session);
+    if (paymentResult.status === 'paid') {
+      await completePaidAttempt(attempt.paymentAttemptId, attempt.primaryOrderNumber, session.amount || attempt.total);
+      return;
+    }
+    if (paymentResult.status === 'failed') {
+      Alert.alert('Payment failed', paymentResult.message || 'Your payment was not completed. You can retry from this checkout or the order detail page.');
+      return;
+    }
+    router.replace('/(customer)/checkout/payment-status');
+  };
+
+  const sendUnserviceablePincodeEnquiry = async () => {
+    if (pincodeEnquiryInFlight.current || !unserviceablePincode || !selectedAddress || !mobile) return;
+    pincodeEnquiryInFlight.current = true;
+    setSubmittingPincodeEnquiry(true);
+    setPincodeEnquiryError('');
+    try {
+      await submitUnserviceablePincodeEnquiry({
+        mobile,
+        pincode: unserviceablePincode,
+        addressId: selectedAddress.id,
+        address: selectedAddress as unknown as Record<string, unknown>,
+        items: [...cart, ...subscriptionCart].map((item) => ({
+          productId: item.id,
+          productName: item.name,
+          quantity: item.quantity,
+          selectedWeight: item.selectedWeight || '',
+          deliveryDate: item.deliveryDate,
+        })),
+      });
+      Alert.alert('Enquiry submitted', 'Your delivery-area enquiry was saved. No order or payment was created.');
+    } catch (error) {
+      setPincodeEnquiryError(error instanceof Error ? error.message : 'Unable to submit your enquiry. Please try again.');
+    } finally {
+      pincodeEnquiryInFlight.current = false;
+      setSubmittingPincodeEnquiry(false);
+    }
+  };
 
   const validateCheckout = async () => {
     if (paymentInFlight.current || validating) return;
     paymentInFlight.current = true;
     setValidationError('');
+    if (unserviceablePincode) {
+      setValidationError(`Pincode ${unserviceablePincode} is not serviceable, so checkout and payment cannot continue.`);
+      paymentInFlight.current = false;
+      return;
+    }
     if (cart.length === 0 && subscriptionCart.length === 0) {
       setValidationError('Your cart is empty.');
       paymentInFlight.current = false;
@@ -174,25 +311,32 @@ export default function Checkout() {
     try {
       const pendingAttempt = await getPendingPaymentAttempt();
       if (pendingAttempt?.orderIds.length) {
-        paymentAttemptId.current = pendingAttempt.paymentAttemptId;
-        const session = await createCashfreePaymentSession(pendingAttempt.orderIds, mobile);
-        await persistCashfreePaymentAttempt({
-          ...pendingAttempt,
-          cashfreeOrderId: session.cashfreeOrderId,
-          total: session.amount || pendingAttempt.total,
+        if (pendingAttempt.authUid && pendingAttempt.authUid !== auth.currentUser?.uid) {
+          throw new Error('A payment attempt belongs to a different signed-in customer. Sign in with that account to recover it.');
+        }
+        const currentFingerprint = buildCheckoutFingerprint({
+          addressId: selectedAddress.id,
+          deliverySlot: deliverySlotForCart(cart, subscriptionCart),
+          oneTimeItems: cart,
+          subscriptionItems: subscriptionCart,
         });
-        const paymentResult = await startCashfreePayment(session);
-        if (paymentResult.status === 'paid') {
-          useAppStore.getState().clearCart();
-          await clearPendingPaymentAttempt();
-          router.replace({ pathname: '/(customer)/checkout/success', params: { orderNumber: pendingAttempt.primaryOrderNumber, total: String(session.amount || pendingAttempt.total) } });
-          return;
+        if (pendingAttempt.checkoutFingerprint !== currentFingerprint) {
+          const attemptDescription = pendingAttempt.primaryOrderNumber || pendingAttempt.primaryOrderId || 'Previous order';
+          const cartMismatch = pendingAttempt.checkoutFingerprint
+            ? 'belongs to a different cart or delivery selection'
+            : 'cannot be matched to your current cart';
+          const resumePreviousAttempt = await new Promise<boolean>((resolve) => Alert.alert(
+            'Previous checkout needs attention',
+            `${attemptDescription} for ${money(pendingAttempt.total)} ${cartMismatch}. Resume that previous payment instead of paying for your current cart?`,
+            [
+              { text: 'Not now', style: 'cancel', onPress: () => resolve(false) },
+              { text: 'Resume previous payment', onPress: () => resolve(true) },
+            ],
+            { cancelable: false },
+          ));
+          if (!resumePreviousAttempt) return;
         }
-        if (paymentResult.status === 'failed') {
-          Alert.alert('Payment failed', paymentResult.message || 'Your payment was not completed. You can retry from this checkout or the order detail page.');
-          return;
-        }
-        router.replace('/(customer)/checkout/payment-status');
+        await continuePaymentAttempt(pendingAttempt);
         return;
       }
 
@@ -296,6 +440,16 @@ export default function Checkout() {
         throw new Error('The complete requested quantity is no longer available on the selected delivery date. Please return to Cart and review availability.');
       }
 
+      const deliverySlot = deliverySlotForCart(cart, subscriptionCart);
+      const authUid = auth.currentUser?.uid;
+      if (!authUid) throw new Error('Your login session expired. Please sign in again.');
+      const checkoutFingerprint = buildCheckoutFingerprint({
+        addressId: selectedAddress.id,
+        deliverySlot,
+        oneTimeItems: cart,
+        subscriptionItems: subscriptionCart,
+      });
+
       const changedDates = resolution.items.filter((item) => item.deliveryDate && item.deliveryDate !== item.requestedDate);
       if (changedDates.length) {
         const rows = changedDates.map((item) => `${item.name}: ${item.requestedDate} → ${item.deliveryDate}`).join('\n');
@@ -311,19 +465,51 @@ export default function Checkout() {
           );
         });
         if (!acceptDates) {
-          for (const changed of changedDates) {
-            const cartItem = [...cart, ...subscriptionCart].find((candidate) => changed.key.includes(candidate.id));
-            await submitAvailabilityContactRequest({
-              mobile,
-              productId: changed.productId,
-              productName: changed.name,
-              requestedGrams: (Number(cartItem?.selectedWeight?.replace(/[^0-9.]/g, '')) || 0) * Number(cartItem?.quantity || 1),
-              requestedDeliveryDate: changed.requestedDate,
-              resolvedDeliveryDate: changed.deliveryDate || undefined,
-              address: selectedAddress as unknown as Record<string, unknown>,
-            });
-          }
-          Alert.alert('Enquiry submitted', 'Your enquiry has been submitted. No order or payment was created.');
+          const affectedItems = changedDates.map((changed) => {
+            if (changed.kind === 'subscription') {
+              const cartItem = subscriptionCart.find((candidate) => `subscription:${candidate.id}:${candidate.planId}:${candidate.startDate}` === changed.key);
+              if (!cartItem) throw new Error(`Could not match ${changed.name} to the current cart. No cart items were removed.`);
+              return { changed, cartItem, kind: 'subscription' as const };
+            }
+            const cartItem = cart.find((candidate) => `one-time:${candidate.id}` === changed.key);
+            if (!cartItem) throw new Error(`Could not match ${changed.name} to the current cart. No cart items were removed.`);
+            return { changed, cartItem, kind: 'one-time' as const };
+          });
+          await saveEnquiriesBeforeRemovingItems(
+            affectedItems,
+            async ({ changed, cartItem }) => {
+              await submitAvailabilityContactRequest({
+                mobile,
+                productId: changed.productId,
+                productName: changed.name,
+                requestedGrams: parseWeightGrams(cartItem.selectedWeight, 0) * cartItem.quantity,
+                requestedDeliveryDate: changed.requestedDate,
+                resolvedDeliveryDate: changed.deliveryDate || undefined,
+                address: selectedAddress as unknown as Record<string, unknown>,
+                requestId: declinedAvailabilityEnquiryId(
+                  authUid,
+                  checkoutFingerprint,
+                  changed.key,
+                  changed.requestedDate,
+                  changed.deliveryDate || '',
+                ),
+              });
+            },
+            ({ kind, cartItem }) => {
+              if (kind === 'subscription') {
+                useAppStore.getState().removeSubscriptionFromCart(cartItem.id, cartItem.planId, cartItem.startDate);
+              } else {
+                useAppStore.getState().removeFromCart(cartItem.id);
+              }
+            },
+          );
+          router.replace('/(customer)/(tabs)/cart');
+          Alert.alert(
+            'Enquiry submitted',
+            useAppStore.getState().cart.length + useAppStore.getState().subscriptionCart.length
+              ? 'Enquiries were saved for the declined delivery-date items. Other items remain in your cart.'
+              : 'Enquiries were saved and the declined items were removed. Your cart is now empty.',
+          );
           return;
         }
 
@@ -334,22 +520,17 @@ export default function Checkout() {
         return;
       }
 
-      // Persist the attempt ID before order creation. If the app closes between
-      // pending-order creation and Cashfree session creation, the same attempt ID
-      // is reused on the next checkout and prevents duplicate business orders.
-      await persistCashfreePaymentAttempt({
-        paymentAttemptId: paymentAttemptId.current,
-        orderIds: [],
-        primaryOrderId: '',
-        primaryOrderNumber: '',
-        total: checkoutTotal,
-      });
+      // The durable attempt ID is shared by concurrent screens and reused after
+      // restart. Order creation uses deterministic document IDs for this attempt.
+      const activeAttempt = await getOrCreatePendingPaymentAttempt(checkoutFingerprint, authUid);
+      await persistCashfreePaymentAttempt({ ...activeAttempt, total: checkoutTotal });
 
       const paymentAttempt = await createCustomerMixedCheckout({
         mobile,
         addressId: selectedAddress.id,
-        deliverySlot: checkoutLines.find((line) => line.dates[0])?.dates[0] || nextWeekSaturday(),
-        paymentAttemptId: paymentAttemptId.current,
+        deliverySlot,
+        paymentAttemptId: activeAttempt.paymentAttemptId,
+        checkoutFingerprint,
         paymentMethod: 'online',
         oneTimeItems: useAppStore.getState().cart,
         subscriptionItems: useAppStore.getState().subscriptionCart,
@@ -360,44 +541,19 @@ export default function Checkout() {
       ].filter(Boolean);
       if (!orderIds.length) throw new Error('No pending order was created for payment.');
 
-      // Persist the business attempt before opening Cashfree. If the app closes,
-      // the attempt can be reconciled later without creating another order set.
-      await persistCashfreePaymentAttempt({
+      const paymentRecord: PendingPaymentAttempt = {
         paymentAttemptId: paymentAttempt.paymentAttemptId,
+        ...(paymentAttempt.cashfreeOrderId ? { cashfreeOrderId: paymentAttempt.cashfreeOrderId } : {}),
         orderIds,
         primaryOrderId: paymentAttempt.primaryOrderId,
         primaryOrderNumber: paymentAttempt.primaryOrderNumber,
         total: paymentAttempt.total,
-      });
-
-      const session = await createCashfreePaymentSession(orderIds, mobile);
-      if (Math.round(session.amount) !== Math.round(paymentAttempt.total)) {
-        throw new Error(`Payment amount mismatch. Checkout total is ${money(paymentAttempt.total)} but Cashfree received ${money(session.amount)}.`);
-      }
-
-      await persistCashfreePaymentAttempt({
-        paymentAttemptId: paymentAttempt.paymentAttemptId,
-        cashfreeOrderId: session.cashfreeOrderId,
-        orderIds,
-        primaryOrderId: paymentAttempt.primaryOrderId,
-        primaryOrderNumber: paymentAttempt.primaryOrderNumber,
-        total: paymentAttempt.total,
-      });
-
-      const paymentResult = await startCashfreePayment(session);
-      if (paymentResult.status === 'paid') {
-        useAppStore.getState().clearCart();
-        await clearPendingPaymentAttempt();
-        router.replace({ pathname: '/(customer)/checkout/success', params: { orderNumber: paymentAttempt.primaryOrderNumber, total: String(paymentAttempt.total) } });
-        return;
-      }
-
-      if (paymentResult.status === 'failed') {
-        Alert.alert('Payment failed', paymentResult.message || 'Your payment was not completed. You can retry from this checkout or the order detail page.');
-        return;
-      }
-
-      router.replace('/(customer)/checkout/payment-status');
+        createdAt: activeAttempt.createdAt,
+        ...(activeAttempt.checkoutFingerprint ? { checkoutFingerprint: activeAttempt.checkoutFingerprint } : {}),
+        ...(activeAttempt.authUid ? { authUid: activeAttempt.authUid } : {}),
+      };
+      await persistCashfreePaymentAttempt(paymentRecord);
+      await continuePaymentAttempt(paymentRecord);
     } catch (error) {
       setValidationError(error instanceof Error ? error.message : 'Unable to validate checkout. Please try again.');
     } finally {
@@ -408,29 +564,78 @@ export default function Checkout() {
 
   const oneTimeLines = checkoutLines.filter((line) => line.kind === 'one-time');
   const subscriptionLines = checkoutLines.filter((line) => line.kind === 'subscription');
+  const mrpSavings = cart.reduce((sum, item) =>
+    sum + (scalePriceDisplay(resolvePriceDisplay(item.price, item.mrp), item.quantity).savings ?? 0), 0);
+  const subscriptionPlanSavings = subscriptionCart.reduce((sum, item) =>
+    sum + (scalePriceDisplay(resolvePriceDisplay(item.price, item.mrp), item.quantity).savings ?? 0), 0);
+  const savings = checkoutSavingsBreakdown({
+    mrpSavings,
+    priceOfferSavings: offerResult.priceSavings,
+    subscriptionPlanSavings,
+    deliverySavings: offerResult.deliverySavings,
+  });
+  const priceOfferName = String(offerResult.priceOffer?.name ?? '').trim().replace(/\s+/g, ' ');
+  const deliveryOfferName = String(offerResult.deliveryOffer?.name ?? '').trim().replace(/\s+/g, ' ');
+  const offerLabel = (name: string, fallback: string) =>
+    `${name || fallback}${/offer$/i.test(name) ? '' : ' offer'}`;
+  const productSavingsBreakdown = [
+    savings.mrpSavings > 0 ? `${money(savings.mrpSavings)} MRP savings` : '',
+    savings.priceOfferSavings > 0 ? `${money(savings.priceOfferSavings)} offer savings` : '',
+  ].filter(Boolean).join(' + ');
 
   const renderPurchase = (line: CheckoutLine) => {
     const item = line.item;
-    const itemMrp = (item.mrp && item.mrp > 0 ? item.mrp : item.price) * item.quantity;
+    const referenceDisplay = scalePriceDisplay(resolvePriceDisplay(item.price, item.mrp), item.quantity);
     const itemPrice = item.price * item.quantity;
-    const itemSaving = Math.max(0, itemMrp - itemPrice);
+    const peerLines = line.kind === 'one-time' ? oneTimeLines : subscriptionLines;
+    const peerIndex = peerLines.findIndex((peer) => peer.key === line.key);
+    const offerSaving = line.kind === 'one-time' ? offerResult.oneTimePriceSavings : offerResult.subscriptionPriceSavings;
+    const allocatedOfferSaving = allocateOfferSavings(
+      offerSaving,
+      peerLines.map((peer) => peer.item.price * peer.item.quantity),
+    )[peerIndex] ?? 0;
+    const finalItemPrice = Math.max(0, itemPrice - allocatedOfferSaving);
     const firstDate = line.dates[0] || nextWeekSaturday();
+    const subscriptionIndex = line.kind === 'subscription'
+      ? subscriptionCart.findIndex((entry) => entry.id === item.id
+        && entry.planId === (item as SubscriptionCartItem).planId
+        && entry.startDate === (item as SubscriptionCartItem).startDate)
+      : -1;
+    const entitlement = subscriptionEntitlements[subscriptionIndex];
 
     return (
       <AppCard key={line.key} style={styles.purchaseCard}>
         <View style={styles.purchaseTop}>
           <View style={styles.purchaseInfo}>
-            <Text style={styles.purchaseName}>{item.name}</Text>
+            <Text style={styles.purchaseName}>{item.name} × {item.quantity}</Text>
             <Text style={styles.purchaseMeta}>
-              {weightLabel(item)} × {item.quantity} · {line.kind === 'subscription' ? (item as SubscriptionCartItem).planName : 'One-time'}
+              {weightLabel(item)} · {line.kind === 'subscription' ? (item as SubscriptionCartItem).planName : 'One-time'}
             </Text>
           </View>
-          <View style={styles.purchasePrice}>
-            {itemSaving > 0 ? <Text style={styles.purchaseMrp}>{money(itemMrp)}</Text> : null}
-            <Text style={styles.purchaseSale}>{money(itemPrice)}</Text>
+          <View style={styles.purchasePriceStack}>
+            {referenceDisplay.originalPrice !== undefined ? (
+              <Text style={styles.purchaseMrp}>
+                {line.kind === 'one-time' ? 'MRP ' : ''}{money(referenceDisplay.originalPrice)}
+              </Text>
+            ) : null}
+            {allocatedOfferSaving > 0 ? (
+              <View style={styles.purchaseOfferPrice}>
+                <Text style={styles.purchaseMrp}>{money(itemPrice)}</Text>
+                <Text style={styles.purchaseSale}>{money(finalItemPrice)}</Text>
+              </View>
+            ) : (
+              <Text style={styles.purchaseSale}>{money(itemPrice)}</Text>
+            )}
           </View>
         </View>
         <Text style={styles.deliveryText}>Delivery: {formatDeliveryDate(firstDate)}</Text>
+        {line.kind === 'subscription' && entitlement ? (
+          <Text style={styles.subscriptionOfferText}>
+            {entitlement.bonusDeliveries > 0
+              ? `${String(entitlement.offer?.name ?? 'Subscription offer')} · +${entitlement.bonusDeliveries} bonus deliveries · ${entitlement.totalDeliveries} deliveries total`
+              : `${entitlement.regularDeliveries} deliveries total`}
+          </Text>
+        ) : null}
       </AppCard>
     );
   };
@@ -459,17 +664,17 @@ export default function Checkout() {
         </AppCard>
       )}
 
+      {subscriptionLines.length > 0 ? (
+        <View>
+          <Text style={styles.sectionTitle}>Subscriptions</Text>
+          {subscriptionLines.map(renderPurchase)}
+        </View>
+      ) : null}
+
       {oneTimeLines.length > 0 ? (
         <View>
           <Text style={styles.sectionTitle}>One-time purchases</Text>
           {oneTimeLines.map(renderPurchase)}
-        </View>
-      ) : null}
-
-      {subscriptionLines.length > 0 ? (
-        <View>
-          <Text style={styles.sectionTitle}>Subscription purchases</Text>
-          {subscriptionLines.map(renderPurchase)}
         </View>
       ) : null}
 
@@ -478,26 +683,62 @@ export default function Checkout() {
         <AppCard style={styles.summaryCard}>
           <View style={styles.summaryLine}>
             <Text style={styles.summaryLabel}>Product subtotal</Text>
-            <Text style={styles.summaryValue}>{money(totals.subtotal)}</Text>
+            <Text style={styles.summaryValue}>{money(payableProductSubtotal)}</Text>
           </View>
-          {offerResult.priceSavings > 0 ? (
-            <View style={styles.summaryLine}>
-              <Text style={styles.saving}>Offer savings</Text>
-              <Text style={styles.saving}>−{money(offerResult.priceSavings)}</Text>
+          <View style={styles.deliverySummaryLine}>
+            <View style={styles.deliverySummaryHeader}>
+              <Text style={styles.summaryLabel}>Delivery charge</Text>
+              <View style={styles.summaryAmount}>
+                {offerResult.deliverySavings > 0 && deliveryCharges ? (
+                  <Text style={styles.purchaseMrp}>{money(deliveryCharges.total)}</Text>
+                ) : null}
+                <Text style={offerResult.deliverySavings > 0 ? styles.discountedSummaryValue : styles.summaryValue}>
+                  {chargeLoading ? 'Calculating…' : money(finalDeliveryCharge)}
+                </Text>
+              </View>
+            </View>
+            {deliveryCharges && deliveryCharges.dates.length > 0 ? (
+              <Text style={styles.chargeNote}>
+                {deliveryChargeGroups.oneTimeDeliveryCount > 0
+                  ? `${money(deliveryCharges.chargePerDate)} × ${deliveryChargeGroups.oneTimeDeliveryCount} one-time delivery dates`
+                  : ''}
+                {deliveryChargeGroups.oneTimeDeliveryCount > 0 && deliveryChargeGroups.subscriptions.some((group) => group.deliveryCount > 0) ? ' · ' : ''}
+                {deliveryChargeGroups.subscriptions
+                  .filter((group) => group.deliveryCount > 0)
+                  .map((group) => `${group.label} · ${money(deliveryCharges.chargePerDate)} × ${group.deliveryCount} delivery dates`)
+                  .join(' · ')}
+              </Text>
+            ) : null}
+          </View>
+          {deliveryCharges && savings.productSavings > 0 && (savings.priceOfferSavings > 0 || savings.mrpSavings > 0) ? (
+            <View style={styles.savingsCard}>
+              <Text style={styles.savingsCardTitle}>
+                🎉 You saved {money(savings.productSavings)} {savings.priceOfferSavings > 0
+                  ? `with the ${offerLabel(priceOfferName, 'Price Offer')}!`
+                  : 'on product pricing!'}
+              </Text>
+              {productSavingsBreakdown ? <Text style={styles.savingsBreakdown}>{productSavingsBreakdown}</Text> : null}
             </View>
           ) : null}
-          <View style={styles.summaryLine}>
-            <Text style={styles.summaryLabel}>Delivery charge</Text>
-            <Text style={styles.summaryValue}>{chargeLoading ? 'Calculating…' : money(finalDeliveryCharge)}</Text>
-          </View>
-          {offerResult.deliverySavings > 0 && subscriptionCart.length === 0 ? (
-            <View style={styles.summaryLine}>
-              <Text style={styles.saving}>Delivery offer</Text>
-              <Text style={styles.saving}>−{money(offerResult.deliverySavings)}</Text>
+          {deliveryCharges && savings.deliverySavings > 0 ? (
+            <View style={styles.savingsCard}>
+              <Text style={styles.savingsCardTitle}>
+                🎉 You saved {money(savings.deliverySavings)} with the {offerLabel(deliveryOfferName, 'Delivery Charge')}!
+              </Text>
             </View>
           ) : null}
-          {deliveryCharges && deliveryCharges.dates.length > 0 ? (
-            <Text style={styles.chargeNote}>Charged once for each unique delivery date ({deliveryCharges.dates.length}).</Text>
+          {deliveryCharges && savings.subscriptionPlanSavings > 0 ? (
+            <View style={styles.savingsCard}>
+              <Text style={styles.savingsCardTitle}>
+                🎉 You saved {money(savings.subscriptionPlanSavings)} on subscription plans!
+              </Text>
+            </View>
+          ) : null}
+          {deliveryCharges && savings.totalSavings > 0 ? (
+            <View style={styles.totalSavingsCard}>
+              <Text style={styles.totalSavingsLabel}>🎉 You saved a total of</Text>
+              <Text style={styles.totalSavingsAmount}>{money(savings.totalSavings)}</Text>
+            </View>
           ) : null}
           <View style={styles.totalLine}>
             <Text style={styles.totalLabel}>Total</Text>
@@ -508,6 +749,16 @@ export default function Checkout() {
 
       {addressError ? <Text style={styles.error}>{addressError}</Text> : null}
       {validationError ? <Text style={styles.error}>{validationError}</Text> : null}
+      {unserviceablePincode ? (
+        <View style={styles.pincodeEnquiry}>
+          <Text style={styles.pincodeEnquiryTitle}>Delivery is not currently available for {unserviceablePincode}</Text>
+          <Text style={styles.muted}>Send us an enquiry and our team can follow up. Checkout and payment will remain unavailable for this address.</Text>
+          <View style={styles.pincodeEnquiryButton}>
+            <Button title="Send delivery enquiry" loading={submittingPincodeEnquiry} onPress={() => void sendUnserviceablePincodeEnquiry()} />
+          </View>
+          {pincodeEnquiryError ? <Text style={styles.error}>{pincodeEnquiryError}</Text> : null}
+        </View>
+      ) : null}
       {validating ? <View style={styles.progressCard}><ActivityIndicator color={colors.greenDark} /><Text style={styles.progressText}>Validating checkout…</Text></View> : null}
       <View style={styles.paymentButtonWrap}>
         <Button title="Continue to Payment" loading={validating} accessibilityLabel={validating ? 'Validating checkout' : 'Continue to Payment'} onPress={validateCheckout} />
@@ -529,17 +780,29 @@ const styles = StyleSheet.create({
   purchaseInfo: { flex: 1, minWidth: 0 },
   purchaseName: { fontSize: 14, fontWeight: '900', color: colors.ink },
   purchaseMeta: { fontSize: 11, color: colors.inkSoft, marginTop: 4 },
-  purchasePrice: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  purchasePriceStack: { alignItems: 'flex-end', gap: 2 },
+  purchaseOfferPrice: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   purchaseMrp: { color: colors.inkFaint, fontSize: 11, textDecorationLine: 'line-through' },
   purchaseSale: { color: colors.greenDark, fontSize: 14, fontWeight: '900' },
   deliveryText: { color: colors.inkSoft, fontSize: 11, marginTop: spacing.sm },
+  subscriptionOfferText: { color: colors.greenDark, fontSize: 11, fontWeight: '800', marginTop: 5 },
   summarySection: { marginTop: 2 },
   summaryCard: { paddingHorizontal: 14, paddingTop: 7, paddingBottom: spacing.md },
   summaryLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.lineSoft },
+  deliverySummaryLine: { gap: 4, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.lineSoft },
+  deliverySummaryHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
   summaryLabel: { color: colors.inkSoft, fontSize: 12 },
   summaryValue: { color: colors.inkSoft, fontSize: 12 },
+  discountedSummaryValue: { color: colors.greenDark, fontSize: 12, fontWeight: '900' },
+  summaryAmount: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   saving: { color: colors.greenDark, fontSize: 12, fontWeight: '900' },
-  chargeNote: { color: colors.inkSoft, fontSize: 10, lineHeight: 15, marginTop: 7, marginBottom: 2 },
+  savingsCard: { backgroundColor: colors.greenTint, borderRadius: radius.md, padding: 10, marginTop: 4, marginBottom: 4 },
+  savingsCardTitle: { color: colors.greenDark, fontSize: 12, fontWeight: '900', lineHeight: 17 },
+  savingsBreakdown: { color: colors.greenDark, fontSize: 10, lineHeight: 15, marginTop: 3 },
+  totalSavingsCard: { alignItems: 'center', backgroundColor: colors.greenTint, borderRadius: radius.md, padding: 12, marginTop: spacing.sm },
+  totalSavingsLabel: { color: colors.greenDark, fontSize: 12, fontWeight: '800', textAlign: 'center' },
+  totalSavingsAmount: { color: colors.greenDark, fontSize: 18, fontWeight: '900', marginTop: 2 },
+  chargeNote: { color: colors.inkSoft, fontSize: 10, lineHeight: 15 },
   totalLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: 13 },
   totalLabel: { color: colors.ink, fontSize: 15, fontWeight: '900' },
   total: { color: colors.ink, fontSize: 18, fontWeight: '900' },
@@ -547,6 +810,8 @@ const styles = StyleSheet.create({
   error: { color: colors.danger, fontSize: 13, fontWeight: '700', marginVertical: 6 },
   progressCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, backgroundColor: colors.panel, borderRadius: radius.md, borderWidth: 1, borderColor: colors.lineSoft, padding: 10, marginBottom: 10 },
   progressText: { color: colors.inkSoft, fontSize: 13, fontWeight: '700' },
+  pincodeEnquiry: { marginTop: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.panel, padding: spacing.md },
+  pincodeEnquiryTitle: { color: colors.ink, fontSize: 14, fontWeight: '900' },
+  pincodeEnquiryButton: { marginTop: spacing.md },
   paymentButtonWrap: { marginTop: 14, marginBottom: 18 },
 });
-

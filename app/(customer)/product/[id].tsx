@@ -1,11 +1,18 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Image, StyleSheet, Text, View } from 'react-native';
-import { useLocalSearchParams } from 'expo-router';
-import { AppCard, Button, EmptyState, LoadingState, OptionCard, QuantityStepper, Screen, SelectField, SelectSheet } from '../../../components/UI';
-import { colors, radius, spacing, typography } from '../../../constants/theme';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { AppBadge, AppCard, Button, EmptyState, ErrorState, LoadingState, OptionCard, QuantityStepper, Screen, SelectField, SelectSheet } from '../../../components/UI';
+import { colors, elevation, radius, spacing, typography } from '../../../constants/theme';
+import { getCartItemCount } from '../../../services/cart/cartService';
 import { getDefaultOneTimeSellingOption, getProducts, type Product, type ProductSellingOption } from '../../../services/products/productService';
-import { isProductSubscriptionEligible } from '../../../services/products/subscriptionEligibility';
 import { getActiveSubscriptionPlans, getSubscriptionPlanPriceForSellingOption, type SubscriptionPlan } from '../../../services/subscriptions/subscriptionService';
+import { productSubscriptionSectionState, type SubscriptionPlanLoadState } from '../../../services/subscriptions/subscriptionPlanDiscovery';
+import { getSubscriptionPlanSellingOption } from '../../../services/subscriptions/subscriptionPlanPrice';
+import { resolvePriceDisplay } from '../../../services/products/priceDisplay';
+import { getAvailableOneTimeSellingOptions } from '../../../services/products/oneTimeSellingOptions';
+import { addToCartAndNavigate, PRODUCT_DETAILS_CART_ROUTE } from '../../../services/cart/productDetailsCartAction';
 import { useAppStore } from '../../../store/appStore';
 
 const money = (value: number, currency = 'INR') => {
@@ -40,19 +47,29 @@ function richTextToNativeText(value?: string) {
 }
 
 export default function ProductDetail() {
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string }>();
   const [products, setProducts] = useState<Product[]>([]);
   const [plans, setPlans] = useState<SubscriptionPlan[]>([]);
   const [loading, setLoading] = useState(true);
+  const [productLoadError, setProductLoadError] = useState('');
+  const [planLoadState, setPlanLoadState] = useState<SubscriptionPlanLoadState>('idle');
+  const [planLoadError, setPlanLoadError] = useState('');
+  const [productRetry, setProductRetry] = useState(0);
+  const [planRetry, setPlanRetry] = useState(0);
   const [planId, setPlanId] = useState('');
   const [selectedSellingOptionId, setSelectedSellingOptionId] = useState('');
   const [packagingOpen, setPackagingOpen] = useState(false);
   const [startDateOpen, setStartDateOpen] = useState(false);
   const [subscriptionStartDate, setSubscriptionStartDate] = useState(nextWeekSaturday());
+  const [addingToCart, setAddingToCart] = useState(false);
+  const addToCartLock = useRef(false);
   const addToCart = useAppStore((s) => s.addToCart);
   const addSubscriptionToCart = useAppStore((s) => s.addSubscriptionToCart);
   const cart = useAppStore((s) => s.cart);
   const subscriptionCart = useAppStore((s) => s.subscriptionCart);
+  const cartCount = useAppStore((s) => getCartItemCount(s.cart, s.subscriptionCart));
   const changeQuantity = useAppStore((s) => s.changeQuantity);
   const changeSubscriptionQuantity = useAppStore((s) => s.changeSubscriptionQuantity);
   const removeFromCart = useAppStore((s) => s.removeFromCart);
@@ -60,35 +77,70 @@ export default function ProductDetail() {
   const setCartPackaging = useAppStore((s) => s.setCartPackaging);
   const setSubscriptionCartPackaging = useAppStore((s) => s.setSubscriptionCartPackaging);
 
+  useFocusEffect(useCallback(() => {
+    addToCartLock.current = false;
+    setAddingToCart(false);
+  }, []));
+
   useEffect(() => {
     let alive = true;
+    setLoading(true);
+    setProducts([]);
+    setPlans([]);
+    setProductLoadError('');
+    setPlanLoadState('idle');
+    setPlanLoadError('');
+    setPlanId('');
+    setSelectedSellingOptionId('');
     void (async () => {
       try {
         const result = await getProducts();
         if (!alive) return;
         setProducts(result.products);
-        const product = result.products.find((item) => item.id === id);
-        if (product?.active) {
-          try {
-            const activePlans = await getActiveSubscriptionPlans(product.id);
-            if (!alive) return;
-            setPlans(activePlans.filter((plan) => plan.active === true && Number(plan.price ?? 0) >= 0));
-          } catch {
-            if (alive) setPlans([]);
-          }
-        }
+      } catch (error) {
+        if (alive) setProductLoadError(error instanceof Error ? error.message : 'Unable to load this product.');
       } finally {
         if (alive) setLoading(false);
       }
     })();
     return () => { alive = false; };
-  }, [id]);
+  }, [id, productRetry]);
 
   const product = useMemo(() => products.find((item) => item.id === id), [products, id]);
+  useEffect(() => {
+    if (!product) {
+      setPlans([]);
+      setPlanLoadState('idle');
+      setPlanLoadError('');
+      return;
+    }
+
+    let alive = true;
+    setPlans([]);
+    setPlanLoadError('');
+    setPlanLoadState('loading');
+    void getActiveSubscriptionPlans(product.id).then((activePlans) => {
+      if (!alive) return;
+      setPlans(activePlans);
+      setPlanLoadState('ready');
+    }).catch((error: unknown) => {
+      if (!alive) return;
+      setPlans([]);
+      setPlanLoadError(error instanceof Error ? error.message : 'Unable to load subscription options.');
+      setPlanLoadState('error');
+    });
+    return () => { alive = false; };
+  }, [product?.id, planRetry]);
+
+  const packagingOptions = product ? getAvailableOneTimeSellingOptions(product) : [];
   const defaultSellingOption = product ? getDefaultOneTimeSellingOption(product) : undefined;
-  const selectedSellingOption: ProductSellingOption | undefined = product?.sellingOptions?.find((option) => option.id === selectedSellingOptionId && option.active !== false) || defaultSellingOption;
-  const canSubscribe = Boolean(product && isProductSubscriptionEligible(product) && plans.length > 0);
-  const canBuyOneTime = Boolean(product?.oneTimePurchase && selectedSellingOption);
+  const selectedSellingOption: ProductSellingOption | undefined = packagingOptions.find((option) => option.id === selectedSellingOptionId) || defaultSellingOption;
+  const planSectionState = productSubscriptionSectionState({
+    loadState: planLoadState,
+    planCount: plans.length,
+  });
+  const canSubscribe = planSectionState === 'ready';
+  const canBuyOneTime = Boolean(selectedSellingOption);
   const nextSaturday = nextWeekSaturday();
   const oneTimeCartItem = product ? cart.find((item) => item.id === product.id) : undefined;
   const selectedSubscriptionCartItem = product && planId
@@ -96,15 +148,17 @@ export default function ProductDetail() {
     : undefined;
   const quantity = planId ? (selectedSubscriptionCartItem?.quantity ?? 0) : (oneTimeCartItem?.quantity ?? 0);
   const selectedPlan = planId ? plans.find((plan) => plan.id === planId) : undefined;
-  const selectedSubscriptionPrice = selectedPlan ? getSubscriptionPlanPriceForSellingOption(selectedPlan, selectedSellingOption?.id) : 0;
-
-  useEffect(() => {
-    if (product && !product.oneTimePurchase && plans.length > 0 && !planId) {
-      setPlanId(plans[0].id);
-    }
-  }, [product, plans, planId]);
+  const selectedSubscriptionPrice = selectedPlan
+    ? getSubscriptionPlanPriceForSellingOption(selectedPlan, selectedSellingOption?.id, selectedSellingOption?.weightGrams)
+    : undefined;
+  const selectedSubscriptionOption = selectedPlan
+    ? getSubscriptionPlanSellingOption(selectedPlan, selectedSellingOption?.id, selectedSellingOption?.weightGrams)
+    : undefined;
+  const selectedPlanHasPrice = selectedPlan !== undefined && selectedSubscriptionPrice !== undefined;
+  const addToCartPrice = planId ? selectedSubscriptionPrice : selectedSellingOption?.price;
 
   if (loading) return <Screen><LoadingState label="Loading product…" /></Screen>;
+  if (productLoadError) return <Screen><ErrorState title="Product unavailable" message={productLoadError} onRetry={() => setProductRetry((attempt) => attempt + 1)} /></Screen>;
   if (!product) return <Screen><EmptyState title="Product not found." /></Screen>;
 
   const imageSource = product.imageUrl?.startsWith('http') ? { uri: product.imageUrl } : require('../../../assets/products/placeholder.png');
@@ -114,18 +168,21 @@ export default function ProductDetail() {
   const formatOptionWeight = (grams: number) => grams >= 1000 && grams % 1000 === 0 ? `${grams / 1000}kg` : `${grams}g`;
 
   const add = () => {
-    if (!canBuyOneTime || !selectedSellingOption) return;
+    if (!canBuyOneTime || !selectedSellingOption) throw new Error('Choose an available package before adding this product to your cart.');
     addToCart(product, formatOptionWeight(selectedSellingOption.weightGrams));
   };
 
   const subscribe = () => {
-    if (!canSubscribe || !selectedPlan || !selectedSellingOption || !subscriptionStartDate) return;
+    if (!canSubscribe || !selectedPlan || !selectedSellingOption || selectedSubscriptionPrice === undefined || !subscriptionStartDate) {
+      throw new Error('Choose an available subscription option and start date before adding it to your cart.');
+    }
     addSubscriptionToCart(product, {
       id: selectedPlan.id,
       name: selectedPlan.name,
       frequency: selectedPlan.frequency,
       deliveriesPerTerm: selectedPlan.deliveriesPerTerm,
       price: selectedSubscriptionPrice,
+      maximumPlanPrice: selectedSubscriptionOption?.maximumPlanPrice,
       sellingOptionId: selectedSellingOption.id,
       sellingOptionLabel: formatOptionWeight(selectedSellingOption.weightGrams),
       weightGrams: selectedSellingOption.weightGrams,
@@ -134,6 +191,24 @@ export default function ProductDetail() {
 
   const selectPlan = (nextPlanId: string) => {
     setPlanId(nextPlanId);
+  };
+
+  const addSelectedPurchaseToCart = async () => {
+    setAddingToCart(true);
+    try {
+      await addToCartAndNavigate(
+        addToCartLock,
+        () => { if (planId) subscribe(); else add(); },
+        () => router.push(PRODUCT_DETAILS_CART_ROUTE),
+      );
+    } catch (error) {
+      setAddingToCart(false);
+      const message = error instanceof Error ? error.message : 'Please check your cart and try again.';
+      Alert.alert('Unable to add to cart', message, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Try again', onPress: () => { void addSelectedPurchaseToCart(); } },
+      ]);
+    }
   };
 
   const decrease = () => {
@@ -156,7 +231,6 @@ export default function ProductDetail() {
     else changeQuantity(product.id, 1);
   };
 
-  const packagingOptions = (product.sellingOptions ?? []).filter((option) => option.active !== false && option.weightGrams > 0).sort((a, b) => a.weightGrams - b.weightGrams);
   const selectPackaging = (option: ProductSellingOption) => {
     setSelectedSellingOptionId(option.id);
     if (oneTimeCartItem && !planId) {
@@ -164,9 +238,11 @@ export default function ProductDetail() {
     }
     if (selectedSubscriptionCartItem && planId) {
       const activePlan = plans.find((item) => item.id === planId);
-      const planOption = activePlan?.sellingOptions?.find((item) => String(item.sellingOptionId ?? item.id ?? '') === String(option.id));
-      if (planOption) {
-        setSubscriptionCartPackaging(product.id, planId, subscriptionStartDate, option.weightGrams, Number(planOption.planPrice ?? activePlan?.price ?? 0), String(planOption.sellingOptionId ?? planOption.id ?? option.id), formatOptionWeight(option.weightGrams));
+      const planOption = activePlan
+        ? getSubscriptionPlanSellingOption(activePlan, option.id, option.weightGrams)
+        : undefined;
+      if (activePlan && planOption) {
+        setSubscriptionCartPackaging(product.id, planId, subscriptionStartDate, option.weightGrams, Number(planOption.planPrice), String(planOption.sellingOptionId ?? planOption.id ?? option.id), formatOptionWeight(option.weightGrams), planOption.maximumPlanPrice);
       }
     }
     setPackagingOpen(false);
@@ -181,6 +257,7 @@ export default function ProductDetail() {
   const hasOneTimeDiscount = Boolean(selectedSellingOption && selectedSellingOption.mrp > selectedSellingOption.price);
 
   return (
+    <View style={styles.screenRoot}>
     <Screen>
       <Image source={imageSource} style={styles.productImage} resizeMode="contain" accessibilityLabel={product.name} />
       <Text style={styles.tag}>{product.type === 'multiple' ? 'Salable combo' : 'Fresh microgreen'}</Text>
@@ -199,20 +276,41 @@ export default function ProductDetail() {
             selected={!planId}
             onPress={() => setPlanId('')}
             trailing={<View style={styles.purchasePriceBlock}>
+              {hasOneTimeDiscount && selectedSellingOption ? <Text style={styles.purchaseMrp}>MRP {money(selectedSellingOption.mrp, product.currency)}</Text> : null}
               <Text style={styles.purchasePrice}>{money(selectedSellingOption?.price ?? 0, product.currency)}</Text>
-              {hasOneTimeDiscount && selectedSellingOption ? <Text style={styles.purchaseMrp}>{money(selectedSellingOption.mrp, product.currency)}</Text> : null}
+              {hasOneTimeDiscount && selectedSellingOption ? <Text style={styles.purchaseSavings}>Save {money(selectedSellingOption.mrp - selectedSellingOption.price, product.currency)}</Text> : null}
             </View>}
           /> : null}
 
-          {canSubscribe ? plans.map((plan) => <OptionCard
-            key={plan.id}
-            title={plan.name}
-            subtitle={Number(plan.deliveriesPerTerm ?? 0) > 0 ? `${Number(plan.deliveriesPerTerm)} deliveries / term` : 'Automatic deliveries'}
-            selected={planId === plan.id}
-            onPress={() => selectPlan(plan.id)}
-            trailing={money(getSubscriptionPlanPriceForSellingOption(plan, selectedSellingOption?.id), product.currency)}
-          />) : null}
+          {canSubscribe ? plans.map((plan) => {
+            const subscriptionPrice = getSubscriptionPlanPriceForSellingOption(plan, selectedSellingOption?.id, selectedSellingOption?.weightGrams);
+            const subscriptionPriceDisplay = subscriptionPrice === undefined
+              ? { originalPrice: undefined, savings: undefined }
+              : resolvePriceDisplay(subscriptionPrice, getSubscriptionPlanSellingOption(plan, selectedSellingOption?.id, selectedSellingOption?.weightGrams)?.maximumPlanPrice);
+            return <OptionCard
+              key={plan.id}
+              title={plan.name}
+              subtitle={Number(plan.deliveriesPerTerm ?? 0) > 0 ? `${Number(plan.deliveriesPerTerm)} deliveries / term` : 'Automatic deliveries'}
+              selected={planId === plan.id}
+              onPress={() => selectPlan(plan.id)}
+              disabled={subscriptionPrice === undefined}
+              trailing={<View style={styles.purchasePriceBlock}>
+                {subscriptionPriceDisplay.originalPrice !== undefined ? <Text style={styles.purchaseMrp}>Original {money(subscriptionPriceDisplay.originalPrice, product.currency)}</Text> : null}
+                {subscriptionPrice !== undefined ? <Text style={styles.purchasePrice}>{money(subscriptionPrice, product.currency)}</Text> : <Text style={styles.purchasePriceUnavailable}>Price unavailable</Text>}
+                {subscriptionPriceDisplay.savings !== undefined ? <Text style={styles.purchaseSavings}>Save {money(subscriptionPriceDisplay.savings, product.currency)}</Text> : null}
+              </View>}
+            />;
+          }) : null}
         </View>
+
+        {planSectionState === 'loading' ? <Text style={styles.subscriptionState}>Loading subscription options…</Text> : null}
+        {planSectionState === 'empty' ? <Text style={styles.subscriptionState}>No active subscription options are available for this product.</Text> : null}
+        {planSectionState === 'error' ? (
+          <View style={styles.subscriptionError}>
+            <Text style={styles.subscriptionState}>{planLoadError || 'Unable to load subscription options.'}</Text>
+            <Button title="Retry subscription options" secondary onPress={() => setPlanRetry((attempt) => attempt + 1)} />
+          </View>
+        ) : null}
 
         {canSubscribe && planId ? (
           <View style={styles.startDateSection}>
@@ -224,17 +322,17 @@ export default function ProductDetail() {
         {quantity > 0 ? (
           <View style={styles.cartActionRow}>
             <QuantityStepper quantity={quantity} onDecrease={decrease} onIncrease={increase} itemLabel={product.name} />
-            <Text style={styles.selectedTotal}>{money((planId ? selectedSubscriptionPrice : (selectedSellingOption?.price ?? 0)) * quantity, product.currency)}{planId ? ' / term' : ''}</Text>
+            <Text style={styles.selectedTotal}>{money((planId ? (selectedSubscriptionPrice ?? 0) : (selectedSellingOption?.price ?? 0)) * quantity, product.currency)}{planId ? ' / term' : ''}</Text>
           </View>
-        ) : (
-          <View style={styles.addAction}>
-            <Button
-              title={planId ? `Add to Cart — ${money(selectedSubscriptionPrice, product.currency)}` : canBuyOneTime && selectedSellingOption ? `Add to Cart — ${money(selectedSellingOption.price, product.currency)}` : 'Purchase unavailable'}
-              onPress={planId ? subscribe : add}
-              disabled={planId ? !canSubscribe : (!canBuyOneTime || !selectedSellingOption)}
-            />
-          </View>
-        )}
+        ) : null}
+        <View style={styles.addAction}>
+          <Button
+            title={addingToCart ? 'Adding to Cart…' : addToCartPrice === undefined ? 'Add to Cart' : `Add to Cart — ${money(addToCartPrice, product.currency)}`}
+            onPress={() => { void addSelectedPurchaseToCart(); }}
+            disabled={planId ? (!canSubscribe || !selectedPlanHasPrice) : (!canBuyOneTime || !selectedSellingOption)}
+            loading={addingToCart}
+          />
+        </View>
       </View>
 
       <SelectSheet
@@ -266,11 +364,34 @@ export default function ProductDetail() {
         <Text style={styles.sectionTitle}>Product description</Text>
         <Text style={styles.description}>{description}</Text>
       </AppCard>
+      <View style={styles.floatingCartClearance} />
     </Screen>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={cartCount > 0 ? `Cart, ${cartCount} ${cartCount === 1 ? 'item' : 'items'}` : 'Cart, empty'}
+      testID="product-details-floating-cart"
+      onPress={() => router.push(PRODUCT_DETAILS_CART_ROUTE)}
+      style={({ pressed }) => [
+        styles.floatingCart,
+        { bottom: Math.max(insets.bottom, spacing.sm) + spacing.md },
+        pressed && styles.floatingCartPressed,
+      ]}
+    >
+      <MaterialCommunityIcons name="cart-outline" size={26} color={colors.white} />
+      <AppBadge style={styles.cartBadge}>
+        {cartCount > 99 ? '99+' : cartCount}
+      </AppBadge>
+    </Pressable>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  screenRoot: { flex: 1 },
+  floatingCartClearance: { height: 72 },
+  floatingCart: { position: 'absolute', right: spacing.lg, width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.greenDark, ...elevation.md },
+  floatingCartPressed: { opacity: 0.82 },
+  cartBadge: { position: 'absolute', top: -3, right: -4, borderWidth: 2, borderColor: colors.panel },
   productImage: { width: '100%', height: 250, backgroundColor: colors.block, borderRadius: radius.xl },
   tag: { color: colors.greenDark, fontSize: typography.caption, fontWeight: '900', marginTop: spacing.lg, textTransform: 'uppercase' },
   title: { fontSize: 25, lineHeight: 30, fontWeight: '900', color: colors.ink, marginTop: 6 },
@@ -281,6 +402,10 @@ const styles = StyleSheet.create({
   purchasePriceBlock: { alignItems: 'flex-end' },
   purchasePrice: { color: colors.greenDark, fontSize: 14, fontWeight: '900' },
   purchaseMrp: { color: colors.inkFaint, textDecorationLine: 'line-through', fontSize: 10, marginTop: 2 },
+  purchaseSavings: { color: colors.greenDark, fontSize: 10, fontWeight: '800', marginTop: 2 },
+  purchasePriceUnavailable: { color: colors.inkFaint, fontSize: 10, fontWeight: '700' },
+  subscriptionState: { color: colors.inkSoft, fontSize: 12, lineHeight: 18, marginTop: spacing.sm },
+  subscriptionError: { gap: spacing.sm, marginTop: spacing.sm },
   startDateSection: { marginTop: spacing.md },
   startDateHint: { color: colors.inkSoft, fontSize: 12, marginTop: 5 },
   cartActionRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: spacing.md },

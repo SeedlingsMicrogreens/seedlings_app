@@ -2,6 +2,7 @@ import { collection, getDocs } from '../core/firestore';
 import { db } from '../core/firebaseClient';
 import { getDatabase } from '../../storage/sqlite';
 import { isProductSubscriptionEligible } from './subscriptionEligibility';
+import { getDefaultOneTimeSellingOptionFromOptions } from './oneTimeSellingOptions';
 
 export type ProductSellingOption = {
   id: string;
@@ -182,10 +183,7 @@ export async function refreshProducts() {
 export function getCachedProducts(): Product[] { return readCachedProducts(); }
 
 export function getDefaultOneTimeSellingOption(product: Product): ProductSellingOption | undefined {
-  const options = Array.isArray(product.sellingOptions) ? product.sellingOptions : [];
-  return options.slice()
-    .filter((option) => option.active !== false && option.weightGrams > 0)
-    .sort((a, b) => a.weightGrams - b.weightGrams)[0];
+  return getDefaultOneTimeSellingOptionFromOptions(product.sellingOptions ?? []);
 }
 
 export function isSubscriptionEligible(product: Product): boolean {

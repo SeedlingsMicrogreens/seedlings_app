@@ -1,6 +1,7 @@
 export type SubscriptionEligibilityProduct = {
   active?: boolean;
   subscriptionPurchase?: boolean;
+  subscriptionEligible?: boolean;
   type?: 'single' | 'multiple' | string;
   components?: Array<{
     productId?: string;
@@ -9,7 +10,7 @@ export type SubscriptionEligibilityProduct = {
 };
 
 export function isProductSubscriptionEligible(product: SubscriptionEligibilityProduct | null | undefined): boolean {
-  if (!product || product.active !== true || product.subscriptionPurchase !== true) return false;
+  if (!product || product.active !== true) return false;
   if (product.type === 'multiple') return false;
   if (!Array.isArray(product.components) || product.components.length !== 1) return false;
 

@@ -18,9 +18,7 @@ export async function reconcilePendingPayment() {
     const result = await verifyCashfreePayment(attempt.cashfreeOrderId);
     if (result.status === 'paid') {
       useAppStore.getState().clearCart();
-      await clearPendingPaymentAttempt();
-    } else if (result.status === 'failed') {
-      await clearPendingPaymentAttempt();
+      await clearPendingPaymentAttempt(attempt.paymentAttemptId);
     }
     return { attempt, result };
   } finally {

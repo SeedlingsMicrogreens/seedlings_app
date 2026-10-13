@@ -51,7 +51,7 @@ export default function CustomerAddressesScreen() {
   };
 
   const save = async () => {
-    const clean = { ...form, mobileNumber: form.mobileNumber.replace(/\D/g, '') };
+    const clean = { ...form, mobileNumber: (form.mobileNumber ?? '').replace(/\D/g, '') };
     try {
       setSaving(true);
       const next = editing ? await editCustomerAddress(mobile, { ...clean, id: editing.id }) : await addCustomerAddress(mobile, clean);

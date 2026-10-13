@@ -114,7 +114,7 @@ async function fetchByIds(collectionName: string, ids: string[]) {
   return snapshots.filter((snapshot) => snapshot.exists());
 }
 
-function requestedProductionQuantities(product: Product, quantityInput: number, packagingInput?: number | string) {
+function requestedProductionQuantities(product: Pick<Product, 'components'>, quantityInput: number, packagingInput?: number | string) {
   const components = Array.isArray(product.components) ? product.components : [];
   const quantity = Math.max(1, Math.floor(quantityInput));
   return calculateComboComponentGrams(components, packagingInput, quantity);
@@ -255,7 +255,7 @@ async function loadAvailabilityContext(deliveryDate: string, requestedProductIds
 }
 
 function calculateAvailability(args: {
-  product: Product;
+  product: Pick<Product, 'components'>;
   quantity: number;
   packagingGrams?: number;
   deliveryDate: string;
@@ -502,7 +502,7 @@ export async function resolveProductDeliveryDate(args: {
 
 /** Calculates customer-facing availability for one product. */
 export async function checkProductAvailability(args: {
-  product: Product;
+  product: Pick<Product, 'components'>;
   quantity: number;
   packagingGrams?: number;
   deliveryDate?: string;

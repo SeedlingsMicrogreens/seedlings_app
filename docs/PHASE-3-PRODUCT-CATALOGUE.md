@@ -69,9 +69,10 @@ For an eligible product:
 
 - Show **One-time purchase** as a purchase option.
 - Show the selected packaging/weight.
-- Show MRP when applicable.
-- Show selling price.
-- Show savings when applicable.
+- Show the purchase-option name and description.
+- Show the selected selling option's original MRP with strikethrough when it exceeds its selling price.
+- Show the selected selling option's selling price prominently in green.
+- Show the savings amount when applicable.
 - Add the selected product/package as a one-time cart item.
 
 Do not perform availability/threshold validation on Product Details. That happens during the order flow.
@@ -85,7 +86,9 @@ For a subscription-eligible product:
 - **Subscription plans are Product-specific.**
 - Only active subscription plans whose Website master field `salableProductId` matches the currently displayed salable Product ID may be shown. Do not substitute Mobile-only `productId` matching for this Website field.
 - Never show a Monthly/Quarterly plan belonging to another Product.
-- Show the plan price and delivery/term information from the matching Product plan.
+- Show the plan name and delivery/term description from the matching Product plan.
+- Show the selected subscription selling price prominently in green.
+- When a discount applies, show the applicable original/reference price with strikethrough and the savings amount.
 - When the selected Product selling option has a Product-specific subscription-plan price, use that selling-option plan price; do not substitute another Product's price or the generic plan base price when a specific option price exists.
 - Allow one matching plan to be selected.
 - Use the same selected product packaging/selling option for the subscription purchase where the Website business model requires it.
@@ -94,6 +97,52 @@ For a subscription-eligible product:
 Do not create a second subscription purchase flow from Product Details.
 
 Subscription delivery dates, address validation, shortage/threshold validation and final checkout remain later-phase responsibilities.
+
+### Selling-option price presentation — MD-first requirement
+
+For both one-time and subscription purchase options, keep the existing Mobile selected-option highlight and display the option name/description alongside its price details. Stack the applicable crossed-out original/reference price (only when greater than the current price), the current selling price in green, and the savings amount when applicable. Keep this change presentation-only; do not alter price resolution, cart values, offers, packaging, or purchase behavior.
+
+Use the Website `components/ProductDetailPage.tsx` purchase-option field meanings:
+
+- **One-time:** the selected Product selling option's `mrp` is the original/reference amount and its `price` is the current selling amount. Display savings only when `mrp > price`, calculated from those existing values.
+- **Subscription:** the selected plan's matching selling-option `planPrice` (using the existing Mobile plan-price resolver) is the current selling amount. Resolve by selected packaging weight first and fall back to selling-option ID only when no weight match exists, matching the Website pricing contract. The original/reference amount is that matched selling option's `maximumPlanPrice`; show savings only when this valid value exceeds the resolved subscription selling amount. Never substitute one-time Product price or MRP. This approved rule supersedes the earlier Mobile-only comparison with the one-time price.
+- The displayed prices and savings must use existing values and the existing Mobile resolver; do not introduce or change pricing calculations.
+
+The current implementation must use the matched plan option's configured `planPrice` and `maximumPlanPrice` without substituting a price for a selected package.
+
+### Product Details subscription option discovery — MD-first requirement
+
+- One-time purchase is available whenever the active salable Product has a valid active selling option; do not gate Product Details on legacy `oneTimePurchase`, `oneTimeEligible`, or equivalent flags.
+- Resolve the product by its Firestore `salesProducts` document ID and load only plans associated by the Website field `salableProductId`; trim identifier whitespace but do not substitute `productId`, `salesProductIds`, or another association.
+- The existence of an active, valid Product-associated plan determines whether subscription options are offered. Do not gate display on legacy `subscriptionPurchase`, `subscriptionEligible`, or structural eligibility flags. Do not show inactive, invalid, or cross-product plans.
+- Preserve Website subscription pricing: match plan selling options by selected packaging weight first, then by trimmed selling-option ID. Use `plan.price` only when no package is selected; a missing match for a selected package remains unavailable. Ignore invalid option prices rather than displaying them.
+- For a selected package, show the plan selling amount and use only that matched plan option's valid `maximumPlanPrice` as the original/reference amount. Show strikethrough and savings only when this reference amount exceeds the selling amount. Never use one-time Product price/MRP as a subscription reference.
+- Distinguish plan loading, a confirmed empty result, and a Firestore load error. A failed read must show a retryable error rather than masquerading as a product with no subscription plans. Clear prior-product plan state when the route changes.
+- The Product Details Add to Cart action must add the currently selected purchase mode and packaging through existing cart-store actions, prevent concurrent duplicate taps, and navigate to Cart only after success. On failure, retain the customer on Product Details and show a retryable error. Preserve existing quantity and remove controls in Cart; the badge count remains the sum of one-time and subscription quantities.
+- Test flag-independent one-time/plan availability, exact `salableProductId` association, active/inactive filtering, weight/ID option resolution, reference/savings display, loading/empty/error states, and Add to Cart count/navigation/failure behavior.
+
+### Product Details subscription discovery — implementation result
+
+- Product Details previously converted every subscription-plan read error into an empty `plans` array. Because rendering required `plans.length > 0`, a failed read was indistinguishable from a genuinely eligible Product with no active plans and silently removed the subscription options.
+- The Product Details and plan service also repeated plan filtering, while a Firestore equality query on `salableProductId` could not return values with incidental surrounding whitespace. If the exact association query yields no valid plans, the service scans active plans and retains only those whose trimmed `salableProductId` exactly matches the current Product ID. No `productId`/alias fallback was added.
+- Plan loading now has explicit loading, empty, ready, and retryable error states. Product route changes clear old product and plan state. Subscription option display is based on active Product-associated plans, not legacy Product eligibility flags.
+- Plan selling-option matching is shared between current-price and reference-price resolution, prioritizes selected packaging weight, then uses a trimmed selling-option ID fallback. Subscription original price and savings use only a valid matched `maximumPlanPrice`; one-time Product prices/MRP are not substituted. The generic `plan.price` is permitted only when no packaging option is selected. A plan without a valid price for a selected Product option cannot be added to Cart; packaging is not substituted.
+- Regression tests cover flag-independent Product purchase availability, an associated active plan, another Product's plan, inactive and invalid plans, identifier whitespace, weight-priority/ID-fallback pricing, invalid option prices, no-match behavior, base-price fallback only with no selected package, and each section state.
+- The 2026-10-13 purchase-options correction removes legacy one-time/subscription flag gates. One-time checkout revalidates that the salable Product is active; subscription checkout revalidates that the plan is active and its `salableProductId` exactly matches the Product.
+- Product Details Add to Cart now uses a single-flight guard, persists the selected package and purchase type through the existing store, navigates to Cart after successful persistence, and shows a retryable error without navigating when the cart write fails. Existing item quantities are incremented while preserving the newly selected package.
+
+### Floating Cart access from Product Details — approved requirement
+
+- Product Details displays a floating bottom-right Cart action with the existing cart icon and a reactive badge sourced directly from shared Zustand `cart` and `subscriptionCart` state.
+- The badge uses existing `getCartItemCount` semantics: sum line quantities from both purchase-type collections; represent an empty cart as zero; do not maintain a separate counter or mutate cart state.
+- Cart content/quantity changes, removal, hydration, and navigation updates are reflected by observing the existing shared store. Existing Cart tab and its badge remain unchanged.
+- Tapping the action navigates to the existing `/(customer)/(tabs)/cart` route without changing cart entries or selections.
+- The floating control must respect bottom safe-area insets, remain reachable above system navigation, and reserve scroll-end clearance so it does not obscure Product Details purchase controls or descriptions. Preserve existing Add to Cart and quantity controls.
+- Regression coverage must exercise count values across one-time and subscription lines as quantities are added, changed, and removed; empty-cart count; and existing navigation-after-success behavior. Product pricing, packaging, cart operations, checkout, and payment are out of scope.
+- Implementation: Product Details selects `getCartItemCount` from shared Zustand cart state, displays a zero badge for an empty cart and caps the badge display at `99+`. The floating button uses the existing Cart tab route and the same route constant as successful Add to Cart navigation. A scroll-end spacer reserves button clearance. No cart or purchase behavior changed.
+- Validation passed: `npm run typecheck`; `npm run test:regression` (40 tests, 0 failures); `npm run check:architecture`; `git diff --check`. Android device `e67876c5` is connected, but Product Details was not rendered or visually inspected for this change.
+- Regression coverage verifies valid one-time options despite false legacy flags, subscription-plan visibility independent of those flags, inactive/cross-product plan filtering, `maximumPlanPrice` savings only, count/navigation/duplicate suppression, and add failure/retry.
+- Validation: `npm run typecheck` passed (0 diagnostics); `npm run test:regression` passed (31 tests); `npm run check:architecture` passed; `git diff --check` passed. No standalone lint/build script is defined in `package.json`. Android runtime verification was not performed in this task; live Firebase plan data was not inspected.
 
 ## 6. Product Catalogue
 
@@ -143,15 +192,9 @@ This is already an implemented and verified Mobile-side behavior. No forced prod
 
 ### CI-30: combo subscription eligibility rule
 
-Approved rule from the current source and shared Website contract: combo/multiple salable products are not eligible for subscription purchase.
+**Superseded for Product Details purchase-option availability by the approved 2026-10-13 rule above.** Active, valid subscription plans associated to the current active salable Product by `salableProductId` determine whether the option is shown. Do not gate Product Details display on `type`, component count, `subscriptionPurchase`, or another legacy eligibility flag.
 
-The Mobile product logic already defines this in the canonical eligibility helper, and the UI and checkout flow must enforce the same rule on every path:
-
-- `type === 'multiple'` is treated as ineligible for recurring subscription purchase.
-- A product must also be `active`, `subscriptionPurchase === true`, and backed by a single valid component definition before it may be subscribed to.
-- Revalidation is still required at checkout because stale client state or an old cart entry must not bypass the rule.
-
-The source mismatch that required this fix is that the product-detail screen was only checking `product.active && plans.length > 0`, which left combo products exposed to subscription UI if plan data still existed. The fix is to centralize the policy in a pure eligibility helper and reuse it in the UI and in the creation path.
+Order fulfilment still validates the Product's actual production component data and selected plan association. That operational validation must not be reused to hide an otherwise valid associated active plan from Product Details.
 
 ## 8. Product Details Content
 
@@ -229,6 +272,7 @@ Update this document before changing the Phase 3 architecture. Inspect the lates
 - Product Details has one clear purchase flow.
 - Packaging is selected before purchase mode using a dropdown/select matching Website UX.
 - One-time and Subscription are clearly distinguishable.
+- Each one-time/subscription purchase option shows its name and description, current selling price in green, and the applicable crossed-out reference price and savings when discounted; values match the existing Website field meanings without changing Mobile pricing calculations.
 - Once an item is in the cart, Product Details shows the current quantity with decrease/remove and increase controls instead of only Add to Cart.
 - Subscription plans are loaded using the Website `salableProductId` field and only the current Product's active plans are displayed.
 - Subscription plan selection does not create a separate confusing purchase flow.
