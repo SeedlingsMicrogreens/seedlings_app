@@ -5,6 +5,7 @@ import { AppText, Logo, Button, Screen, TextAction } from '../../../components/U
 import { colors, spacing, typography } from '../../../constants/theme';
 import { useAppStore } from '../../../store/appStore';
 import { ensureClientOnboarding, requestClientOtp } from '../../../services/clientOnboarding';
+import { CustomerAuthenticationError } from '../../../services/auth/customerPhoneAuth';
 
 const OTP_VALIDITY_SECONDS = 120;
 const OTP_LENGTH = 4;
@@ -130,7 +131,12 @@ export default function OTP() {
       await login(mobile);
       router.replace('/(customer)/(tabs)');
     } catch (error) {
-      console.error('Customer verification failed:', error);
+      console.error(
+        'Customer verification failed:',
+        error instanceof CustomerAuthenticationError
+          ? { stage: error.stage, code: error.code }
+          : { name: error instanceof Error ? error.name : 'UnknownError' },
+      );
       setVerificationError(
         error instanceof Error ? error.message : 'Invalid OTP. Please try again.',
       );

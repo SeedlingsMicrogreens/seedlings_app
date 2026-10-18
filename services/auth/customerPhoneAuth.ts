@@ -1,11 +1,43 @@
-import { Platform } from 'react-native';
 import type { CustomerAuthUser } from '../core/customerAuth';
-import { sendCustomerOtp, verifyCustomerOtp, type SendCustomerOtpResult } from './customerOtpApi';
+import {
+  sendCustomerOtp,
+  verifyCustomerOtp,
+  type SendCustomerOtpResult,
+  type VerifyCustomerOtpResult,
+} from './customerOtpApi';
 
 let activePhoneNumber: string | null = null;
 let requestInFlight = false;
 
 export type CustomerOtpRequest = SendCustomerOtpResult;
+export type CustomerAuthenticationFailureStage = 'otp-api' | 'firebase-session';
+
+export class CustomerAuthenticationError extends Error {
+  readonly cause: unknown;
+  readonly code?: string;
+
+  constructor(
+    readonly stage: CustomerAuthenticationFailureStage,
+    message: string,
+    cause: unknown,
+  ) {
+    super(message);
+    this.name = 'CustomerAuthenticationError';
+    this.cause = cause;
+    this.code = getErrorCode(cause);
+  }
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
+    return error.code;
+  }
+  return undefined;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Unknown error.';
+}
 
 function normalizeIndianMobile(value: string): string {
   const digits = String(value || '').replace(/\D/g, '');
@@ -49,26 +81,27 @@ export async function confirmCustomerOtp(code: string): Promise<CustomerAuthUser
   }
 
   const mobile = activePhoneNumber;
-  const result = await verifyCustomerOtp(mobile, otp);
+  let result: VerifyCustomerOtpResult;
+  try {
+    result = await verifyCustomerOtp(mobile, otp);
+  } catch (error) {
+    throw new CustomerAuthenticationError(
+      'otp-api',
+      `OTP verification API failed: ${getErrorMessage(error)}`,
+      error,
+    );
+  }
 
   try {
-    if (Platform.OS === 'web') {
-      const { signInWithCustomToken } = await import('firebase/auth');
-      const { auth } = await import('../core/firebaseClient');
-      const credential = await signInWithCustomToken(auth, result.customToken);
-      return {
-        uid: credential.user.uid,
-        phoneNumber: credential.user.phoneNumber ?? null,
-      };
-    }
-
-    const { auth } = await import('../core/firebaseClient');
-    const { signInWithCustomToken } = await import('firebase/auth');
-    const credential = await signInWithCustomToken(auth, result.customToken);
-    return {
-      uid: credential.user.uid,
-      phoneNumber: credential.user.phoneNumber ?? null,
-    };
+    const { signInWithCustomerCustomToken } = await import('../core/firebaseClient');
+    return await signInWithCustomerCustomToken(result.customToken);
+  } catch (error) {
+    const code = getErrorCode(error);
+    throw new CustomerAuthenticationError(
+      'firebase-session',
+      `Firebase customer session failed${code ? ` (${code})` : ''}: ${getErrorMessage(error)}`,
+      error,
+    );
   } finally {
     activePhoneNumber = null;
   }

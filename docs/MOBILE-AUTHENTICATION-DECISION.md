@@ -485,6 +485,13 @@ Firebase Anonymous Auth for customer login
 
 `signInWithCustomToken()` is the approved Mobile Firebase sign-in mechanism after successful server OTP verification.
 
+Use the SDK that owns the platform's Auth instance:
+
+- Web uses the Firebase Web SDK (`firebase/auth`) with the Web Auth instance.
+- Android and iOS use React Native Firebase Auth (`@react-native-firebase/auth`) with the native Auth instance from `firebaseClient.native.ts`.
+- Never pass a React Native Firebase Auth instance to the Firebase Web SDK.
+- Sign-out must use the corresponding platform SDK and Auth instance as well.
+
 ## 16. Authentication API Security
 
 The authentication API must enforce server-side controls appropriate for OTP authentication, including:

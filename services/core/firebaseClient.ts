@@ -1,7 +1,8 @@
 import { initializeApp } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
-import { getAuth } from 'firebase/auth';
+import { getAuth, signInWithCustomToken, signOut } from 'firebase/auth';
+import type { CustomerAuthUser } from './customerAuth';
 
 const firebaseConfig = {
   apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY ?? process.env.NEXT_PUBLIC_FIREBASE_API_KEY ?? '',
@@ -22,3 +23,15 @@ export const db = getFirestore(app);
 export const storage = getStorage(app);
 export const auth = getAuth(app);
 export { app };
+
+export async function signInWithCustomerCustomToken(customToken: string): Promise<CustomerAuthUser> {
+  const credential = await signInWithCustomToken(auth, customToken);
+  return {
+    uid: credential.user.uid,
+    phoneNumber: credential.user.phoneNumber ?? null,
+  };
+}
+
+export async function signOutCustomerAuth(): Promise<void> {
+  await signOut(auth);
+}

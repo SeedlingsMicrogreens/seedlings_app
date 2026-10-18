@@ -11,6 +11,8 @@ Mobile implementation is now wired to the approved authentication API contract:
 - `POST /api/customer/auth/verify-otp`
 - Demo OTP is accepted only from the server response.
 - Successful verification signs the Mobile client in with `signInWithCustomToken()`.
+- Web uses the Firebase Web SDK with its Web Auth instance; Android/iOS use React Native Firebase Auth with the native Auth instance.
+- The platform-specific Auth instance must never be passed to the other platform's SDK.
 - Firebase Phone Authentication and local fixed-OTP verification are removed from the Mobile implementation.
 - The same authentication API is implemented by Website and consumed by Mobile. Both platforms use the same customer mobile identity and Firebase UID so authentication is interchangeable across platforms.
 
