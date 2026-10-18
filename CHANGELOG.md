@@ -291,3 +291,10 @@
 - Account menu rows explicitly prevent wrapping and reserve a fixed-width, vertically centered chevron area on the right.
 - Added safe top spacing to the Account profile hero so the avatar is not clipped behind the fixed customer header when a previous scroll offset is restored.
 - No OTP, Firebase identity, demo/real OTP, payment, or order behavior changed.
+
+## 2026-10-18 — Payment visibility and checkout precision
+- Delivery Calendar now filters virtual subscription deliveries to server-persisted paid subscriptions and filters actual delivery records against the paid parent subscription and any linked order payment status.
+- Mobile checkout now uses a single INR two-decimal rounding helper for offer allocation, persisted order totals, and displayed payable total reconciliation.
+- Delivery-charge offers are suppressed for subscription and mixed carts, matching the approved Website–Mobile parity rule.
+- Added regression coverage for pending/failed calendar entries and paise-level checkout rounding.
+- Runtime Firestore/Cashfree/device verification remains required; see `docs/PHASE-7-PAYMENT.md` and `docs/PHASE-10-DELIVERY-CALENDAR-JOURNEY.md`.

@@ -11,13 +11,50 @@ import { isProductSubscriptionEligible } from '../services/products/subscription
 import { getAvailableOneTimeSellingOptions, getDefaultOneTimeSellingOptionFromOptions } from '../services/products/oneTimeSellingOptions';
 import { shouldSubmitAvailabilityEnquiry } from '../services/orders/customerOrderAvailability';
 import { normalizePaymentOrderIds } from '../services/payments/paymentOrderIdUtils';
+import { filterPaidCalendarDeliveries, filterPaidCalendarSubscriptions, isPaidPaymentStatus } from '../services/subscriptions/calendarPaymentFilter';
 import { getCartItemCount, getUnifiedCartTotals, replaceProductCartSelectionInCart } from '../services/cart/cartService';
 import { addToCartAndNavigate, PRODUCT_DETAILS_CART_ROUTE } from '../services/cart/productDetailsCartAction';
 import { mergeCustomerProfileCacheValues } from '../services/customerProfileState';
 import { resolvePriceDisplay, scalePriceDisplay } from '../services/products/priceDisplay';
-import { allocateOfferSavings, calculateCheckoutPayableDeliveryCharge, calculateCheckoutPayableProductSubtotal, calculateCheckoutPayableTotal, computeCustomerOffers, computeSubscriptionDeliveryEntitlements } from '../services/orders/customerOffers';
+import { allocateOfferSavings, calculateCheckoutPayableDeliveryCharge, calculateCheckoutPayableProductSubtotal, calculateCheckoutPayableTotal, computeCustomerOffers, computeSubscriptionDeliveryEntitlements, roundCheckoutMoney } from '../services/orders/customerOffers';
 import { checkoutSavingsBreakdown, formatCheckoutAmount } from '../services/orders/checkoutSavings';
 import { CUSTOMER_NOTIFICATIONS_ROUTE, notificationUnreadBadgeLabel, notificationUnreadCount, type CustomerNotification } from '../services/notifications/notificationService';
+
+test('checkout money rounds consistently to INR paise', () => {
+  assert.equal(roundCheckoutMoney(383.699999999), 383.7);
+  assert.equal(roundCheckoutMoney(383.705), 383.71);
+  assert.equal(roundCheckoutMoney(Number.NaN), 0);
+  assert.equal(calculateCheckoutPayableTotal(100.105, 0.105, {
+    priceSavings: 0, oneTimePriceSavings: 0, subscriptionPriceSavings: 0,
+    deliverySavings: 0, totalSavings: 0,
+  }), 100.22);
+});
+
+test('delivery calendar includes only paid subscriptions and their paid linked orders', () => {
+  assert.equal(isPaidPaymentStatus('paid'), true);
+  assert.equal(isPaidPaymentStatus('successful'), true);
+  assert.equal(isPaidPaymentStatus('pending'), false);
+  assert.equal(isPaidPaymentStatus('failed'), false);
+
+  const subscriptions = filterPaidCalendarSubscriptions([
+    { id: 'paid-sub', paymentStatus: 'paid', status: 'active' },
+    { id: 'pending-sub', paymentStatus: 'pending', status: 'pending_payment' },
+    { id: 'failed-sub', paymentStatus: 'failed', status: 'active' },
+  ]);
+  assert.deepEqual(subscriptions.map((subscription) => subscription.id), ['paid-sub']);
+
+  const deliveries = filterPaidCalendarDeliveries([
+    { id: 'paid-linked', subscriptionId: 'paid-sub', orderId: 'paid-order' },
+    { id: 'pending-linked', subscriptionId: 'paid-sub', orderId: 'pending-order' },
+    { id: 'failed-sub-delivery', subscriptionId: 'failed-sub', orderId: 'paid-order' },
+    { id: 'legacy-paid-sub', subscriptionId: 'paid-sub' },
+    { id: 'unknown-sub', subscriptionId: 'missing-sub', orderId: 'paid-order' },
+  ], subscriptions, [
+    { id: 'paid-order', paymentStatus: 'paid' },
+    { id: 'pending-order', paymentStatus: 'pending' },
+  ]);
+  assert.deepEqual(deliveries.map((delivery) => delivery.id), ['paid-linked', 'legacy-paid-sub']);
+});
 
 test('shows and scales reference price savings only when the original exceeds the selling price', () => {
   assert.deepEqual(resolvePriceDisplay(80, 100), { originalPrice: 100, savings: 20 });
@@ -98,7 +135,7 @@ test('checkout product subtotal reflects only the applied price offer while MRP 
   assert.equal(calculateCheckoutPayableTotal(400, 0, offerResult), payableSubtotal);
 });
 
-test('checkout applies delivery offer to mixed one-time and subscription delivery totals once', () => {
+test('checkout suppresses delivery-charge offers for mixed one-time and subscription carts', () => {
   const offerResult = computeCustomerOffers([{
     id: 'delivery-prelaunch',
     name: 'Pre Launch offer',
@@ -128,9 +165,10 @@ test('checkout applies delivery offer to mixed one-time and subscription deliver
     }],
   });
 
-  assert.equal(offerResult.deliverySavings, 60);
-  assert.equal(calculateCheckoutPayableDeliveryCharge(176, offerResult.deliverySavings), 116);
-  assert.equal(calculateCheckoutPayableTotal(700, 176, offerResult), 816);
+  assert.equal(offerResult.deliveryOffer, undefined);
+  assert.equal(offerResult.deliverySavings, 0);
+  assert.equal(calculateCheckoutPayableDeliveryCharge(176, offerResult.deliverySavings), 176);
+  assert.equal(calculateCheckoutPayableTotal(700, 176, offerResult), 876);
   assert.deepEqual(chargeGroups, {
     oneTimeDeliveryCount: 1,
     subscriptions: [{ label: 'Monthly', deliveryCount: 3 }],
@@ -304,8 +342,9 @@ test('applies best price and delivery offers across one-time, subscription, and 
   assert.equal(result.priceOffer?.id, 'percent-price');
   assert.equal(result.oneTimePriceSavings, 25);
   assert.equal(result.subscriptionPriceSavings, 25);
-  assert.equal(result.deliverySavings, 138);
-  assert.equal(calculateCheckoutPayableTotal(200, 230, result), 242);
+  assert.equal(result.deliveryOffer, undefined);
+  assert.equal(result.deliverySavings, 0);
+  assert.equal(calculateCheckoutPayableTotal(200, 230, result), 150 + 230);
   assert.deepEqual(allocateOfferSavings(25, [100, 100]), [12.5, 12.5]);
 
   const oneTimeOnlyResult = computeCustomerOffers(offers.filter((offer) =>
@@ -341,7 +380,8 @@ test('applies best price and delivery offers across one-time, subscription, and 
       geoId: 'geo-1',
     }],
   }, '2026-10-13');
-  assert.equal(mixedCartWithZeroPriceSubscription.deliverySavings, 50);
+  assert.equal(mixedCartWithZeroPriceSubscription.deliveryOffer, undefined);
+  assert.equal(mixedCartWithZeroPriceSubscription.deliverySavings, 0);
 });
 
 test('applies subscription bonus offers to eligible frequencies without changing checkout price offers', () => {

@@ -28,6 +28,11 @@ Cashfree remains the payment API boundary. No Firebase Functions are introduced.
 - Reschedule is available only for active, paid subscriptions and is validated by the server for ownership, date, schedule and delivery state.
 - Skip Delivery is not supported: no button, menu item, handler, action type, API request or new skipped state may be introduced. Historical records, if present, may be displayed safely but cannot enable a new skip action.
 
+## Payment visibility rule — 2026-10-18
+- Delivery Calendar may show future virtual deliveries only for subscriptions whose persisted `paymentStatus` is `paid` (or a documented successful equivalent) and whose subscription status is `active` or `paused`. A locally cached status or active-looking status alone is not proof of payment.
+- Actual `subscriptionDeliveries` entries must belong to a paid subscription. If an entry includes `orderId`, that order must also have an authoritative persisted paid/successful payment status. Entries linked to pending, failed, refunded, unknown, or missing orders are excluded from the customer calendar.
+- This is a display filter only. Mobile must not mutate order, subscription, payment, inventory, or delivery records to hide unpaid entries. Payment status remains server-authoritative.
+
 ## Mobile UX
 - Calendar opens on the current month and supports previous/next month navigation.
 - Upcoming, actual/delivered and rescheduled states are visually distinct.

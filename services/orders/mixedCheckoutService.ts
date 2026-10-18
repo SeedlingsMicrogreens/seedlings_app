@@ -7,7 +7,7 @@ import { buildSubscriptionDeliveryDates, calculateUniqueDateCheckoutDeliveryChar
 import type { CustomerAddress } from '../customerAddresses';
 import type { CartItem, SubscriptionCartItem } from '../cart/cartService';
 import type { Product } from '../products/productService';
-import { allocateOfferSavings, calculateCheckoutPayableTotal, calculateCustomerOffers } from './customerOffers';
+import { allocateOfferSavings, calculateCheckoutPayableTotal, calculateCustomerOffers, roundCheckoutMoney } from './customerOffers';
 import { parseWeightGrams } from './weightUtils';
 import { checkoutDocumentId, checkoutOrderNumber, checkoutSubscriptionNumber } from './checkoutAttemptUtils';
 import { getSubscriptionPlanPriceForSellingOption, getSubscriptionPlanSellingOption } from '../subscriptions/subscriptionPlanPrice';
@@ -171,9 +171,9 @@ function productOrderItem(product: Record<string, unknown> & { id: string }, ite
     packaging: packagingGrams,
     weightGrams,
     quantity,
-    mrp,
-    unitPrice: price,
-    lineTotal: price * quantity,
+    mrp: roundCheckoutMoney(mrp),
+    unitPrice: roundCheckoutMoney(price),
+    lineTotal: roundCheckoutMoney(price * quantity),
     deliveryDate,
     imageUrl: clean(product.imageUrl),
   };
@@ -278,8 +278,8 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
     availabilityResults.push(availability);
     const orderItem = productOrderItem({ ...product, id: snap.id }, item, deliveryDate);
     oneOrderItems.push(orderItem);
-    oneSubtotal += number(orderItem.lineTotal);
-    oneMrpSubtotal += number(orderItem.mrp) * number(orderItem.quantity);
+    oneSubtotal = roundCheckoutMoney(oneSubtotal + number(orderItem.lineTotal));
+    oneMrpSubtotal = roundCheckoutMoney(oneMrpSubtotal + number(orderItem.mrp) * number(orderItem.quantity));
   }
 
   for (const [subscriptionIndex, item] of input.subscriptionItems.entries()) {
@@ -335,7 +335,7 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
     availabilityResults.push(availability);
 
     const chargeableSubscriptionDates = subscriptionDates.filter((date) => !assignedDeliveryDates.has(date));
-    const deliveryFee = chargeableSubscriptionDates.reduce((sum, date) => sum + Number(deliveryChargeForDate.get(date)?.charge ?? 0), 0);
+    const deliveryFee = roundCheckoutMoney(chargeableSubscriptionDates.reduce((sum, date) => sum + Number(deliveryChargeForDate.get(date)?.charge ?? 0), 0));
     for (const date of subscriptionDates) assignedDeliveryDates.add(date);
     const firstSubscriptionDate = first;
     const charge = deliveryChargeForDate.get(firstSubscriptionDate);
@@ -405,13 +405,13 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
         weightGrams: weight,
         quantity,
         unitPrice: price,
-        lineTotal: price * quantity,
+        lineTotal: roundCheckoutMoney(price * quantity),
         imageUrl: clean(product.imageUrl),
       }],
-      subtotal: price * quantity,
+      subtotal: roundCheckoutMoney(price * quantity),
       deliveryFee,
       discount: 0,
-      total: price * quantity + deliveryFee,
+      total: roundCheckoutMoney(price * quantity + deliveryFee),
       currency: 'INR',
       paymentStatus: 'pending',
       paymentMethod: clean(input.paymentMethod) || 'online',
@@ -478,15 +478,15 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
         subscriptionEntitlements: [],
       };
   const subscriptionSubtotal = subscriptionWrites.reduce((sum, item) => sum + number(item.order.subtotal), 0);
-  const expectedCheckoutTotal = calculateCheckoutPayableTotal(
+  const expectedCheckoutTotal = roundCheckoutMoney(calculateCheckoutPayableTotal(
     oneSubtotal + subscriptionSubtotal,
     deliveryCharges.total,
     offerResult,
-  );
+  ));
   let remainingDeliveryOfferSavings = Math.min(offerResult.deliverySavings, deliveryCharges.total);
   const allocateDeliveryOfferSaving = (deliveryFee: number) => {
-    const saving = Math.min(Math.max(0, deliveryFee), remainingDeliveryOfferSavings);
-    remainingDeliveryOfferSavings = Math.max(0, Math.round((remainingDeliveryOfferSavings - saving) * 100) / 100);
+    const saving = roundCheckoutMoney(Math.min(Math.max(0, deliveryFee), remainingDeliveryOfferSavings));
+    remainingDeliveryOfferSavings = roundCheckoutMoney(Math.max(0, remainingDeliveryOfferSavings - saving));
     return saving;
   };
   const oneOrderGroups = groupOneTimeOrderItemsByDeliveryDate(oneOrderItems, targetDate);
@@ -530,29 +530,29 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
     const allocated = subscriptionPriceAllocations[index] ?? 0;
     const originalDeliveryFee = number(write.order.deliveryFee);
     const deliverySaving = allocateDeliveryOfferSaving(originalDeliveryFee);
-    const deliveryFee = Math.max(0, originalDeliveryFee - deliverySaving);
-    write.order.discount = allocated;
-    write.order.offerDiscount = allocated + deliverySaving;
-    write.order.offerPriceSavings = allocated;
-    write.order.offerDeliverySavings = deliverySaving;
+    const deliveryFee = roundCheckoutMoney(Math.max(0, originalDeliveryFee - deliverySaving));
+    write.order.discount = roundCheckoutMoney(allocated);
+    write.order.offerDiscount = roundCheckoutMoney(allocated + deliverySaving);
+    write.order.offerPriceSavings = roundCheckoutMoney(allocated);
+    write.order.offerDeliverySavings = roundCheckoutMoney(deliverySaving);
     write.order.offerPriceName = offerResult.priceOffer?.name || '';
     write.order.offerDeliveryName = offerResult.deliveryOffer?.name || '';
-    write.order.offerTotalSavings = allocated + deliverySaving;
-    write.order.deliveryChargeOriginal = originalDeliveryFee;
+    write.order.offerTotalSavings = roundCheckoutMoney(allocated + deliverySaving);
+    write.order.deliveryChargeOriginal = roundCheckoutMoney(originalDeliveryFee);
     write.order.deliveryFee = deliveryFee;
-    write.order.total = Math.max(0, subtotal - allocated) + deliveryFee;
+    write.order.total = roundCheckoutMoney(Math.max(0, subtotal - allocated) + deliveryFee);
   }
   const oneOrderWrites: Array<{ ref: ReturnType<typeof doc>; orderNumber: string; order: Record<string, unknown> }> = [];
   for (let index = 0; index < oneOrderDates.length; index += 1) {
     const date = oneOrderDates[index];
     const items = oneOrderGroups.find(([groupDate]) => groupDate === date)?.[1] || [];
-    const groupSubtotal = items.reduce((sum, item) => sum + number(item.lineTotal), 0);
-    const groupMrpSubtotal = items.reduce((sum, item) => sum + number(item.mrp, number(item.unitPrice)) * number(item.quantity), 0);
+    const groupSubtotal = roundCheckoutMoney(items.reduce((sum, item) => sum + number(item.lineTotal), 0));
+    const groupMrpSubtotal = roundCheckoutMoney(items.reduce((sum, item) => sum + number(item.mrp, number(item.unitPrice)) * number(item.quantity), 0));
     const allocatedOffer = oneTimePriceAllocations[index] ?? 0;
-    const groupDeliveryOriginal = oneTimeDeliveryChargeByDate.get(date) ?? 0;
-    const groupDeliverySavings = oneTimeDeliverySavingsByDate.get(date) ?? 0;
-    const groupDeliveryFee = Math.max(0, groupDeliveryOriginal - groupDeliverySavings);
-    const groupProductSavings = Math.max(0, groupMrpSubtotal - groupSubtotal) + allocatedOffer;
+    const groupDeliveryOriginal = roundCheckoutMoney(oneTimeDeliveryChargeByDate.get(date) ?? 0);
+    const groupDeliverySavings = roundCheckoutMoney(oneTimeDeliverySavingsByDate.get(date) ?? 0);
+    const groupDeliveryFee = roundCheckoutMoney(Math.max(0, groupDeliveryOriginal - groupDeliverySavings));
+    const groupProductSavings = roundCheckoutMoney(Math.max(0, groupMrpSubtotal - groupSubtotal) + allocatedOffer);
     const oneOrderRef = doc(db, 'orders', checkoutDocumentId(paymentAttemptId, 'one_time_order', String(index)));
     const oneOrderNumber = checkoutOrderNumber(paymentAttemptId, index);
     oneOrderWrites.push({ ref: oneOrderRef, orderNumber: oneOrderNumber, order: stripUndefined({
@@ -565,14 +565,14 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
       subtotal: groupSubtotal,
       deliveryFee: groupDeliveryFee,
       discount: groupProductSavings,
-      offerDiscount: allocatedOffer + groupDeliverySavings,
-      offerPriceSavings: allocatedOffer,
-      offerDeliverySavings: groupDeliverySavings,
+      offerDiscount: roundCheckoutMoney(allocatedOffer + groupDeliverySavings),
+      offerPriceSavings: roundCheckoutMoney(allocatedOffer),
+      offerDeliverySavings: roundCheckoutMoney(groupDeliverySavings),
       offerPriceName: offerResult.priceOffer?.name || '',
       offerDeliveryName: offerResult.deliveryOffer?.name || '',
-      offerTotalSavings: allocatedOffer + groupDeliverySavings,
+      offerTotalSavings: roundCheckoutMoney(allocatedOffer + groupDeliverySavings),
       deliveryChargeOriginal: groupDeliveryOriginal,
-      total: Math.max(0, groupSubtotal - allocatedOffer) + groupDeliveryFee,
+      total: roundCheckoutMoney(Math.max(0, groupSubtotal - allocatedOffer) + groupDeliveryFee),
       currency: 'INR',
       paymentStatus: 'pending',
       paymentMethod: clean(input.paymentMethod) || 'online',
@@ -598,11 +598,11 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
     }) });
   }
 
-  const persistedTotal = [
+  const persistedTotal = roundCheckoutMoney([
     ...oneOrderWrites.map((item) => number(item.order.total)),
     ...subscriptionWrites.map((item) => number(item.order.total)),
-  ].reduce((sum, total) => sum + total, 0);
-  if (Math.round((persistedTotal - expectedCheckoutTotal) * 100) !== 0) {
+  ].reduce((sum, total) => sum + total, 0));
+  if (persistedTotal !== expectedCheckoutTotal) {
     throw new Error('Checkout order totals do not match the displayed product and delivery total. Please return to Cart and try again.');
   }
 

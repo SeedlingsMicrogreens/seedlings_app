@@ -6,6 +6,8 @@ import { AppCard, AppIconButton, AppText, BottomSheet, Button, Screen } from '..
 import { colors, radius, spacing, typography } from '../../../constants/theme';
 import { useAppStore } from '../../../store/appStore';
 import { getCustomerSubscriptions, type CustomerSubscription } from '../../../services/subscriptions/subscriptionService';
+import { filterPaidCalendarDeliveries, filterPaidCalendarSubscriptions } from '../../../services/subscriptions/calendarPaymentFilter';
+import { getCustomerOrders, type CustomerOrder } from '../../../services/orders/orderService';
 import { getCustomerSubscriptionDeliveries, updateSubscriptionDelivery, type SubscriptionDelivery } from '../../../services/subscriptions/subscriptionDeliveryService';
 
 const parseDate = (value?: string) => {
@@ -50,6 +52,7 @@ export default function DeliveryCalendar() {
   const mobile = useAppStore(s => s.mobile);
   const [subs, setSubs] = useState<CustomerSubscription[]>([]);
   const [deliveries, setDeliveries] = useState<SubscriptionDelivery[]>([]);
+  const [orders, setOrders] = useState<CustomerOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -61,12 +64,14 @@ export default function DeliveryCalendar() {
     if (!mobile) { router.replace('/(customer)/auth/login'); return; }
     setLoading(true); setError('');
     try {
-      const [subscriptionData, deliveryData] = await Promise.all([
+      const [subscriptionData, deliveryData, orderData] = await Promise.all([
         getCustomerSubscriptions(mobile),
         getCustomerSubscriptionDeliveries(mobile),
+        getCustomerOrders(mobile),
       ]);
       setSubs(subscriptionData);
       setDeliveries(deliveryData);
+      setOrders(orderData);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unable to load delivery calendar.');
     } finally { setLoading(false); }
@@ -74,8 +79,10 @@ export default function DeliveryCalendar() {
 
   useEffect(() => { void load(); }, [mobile]);
 
-  const future = useMemo(() => buildFutureEvents(subs, month), [subs, month]);
-  const actual = useMemo(() => deliveries.filter(d => d.deliveryDate && d.deliveryDate.startsWith(`${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}`)), [deliveries, month]);
+  const paidSubs = useMemo(() => filterPaidCalendarSubscriptions(subs), [subs]);
+  const future = useMemo(() => buildFutureEvents(paidSubs, month), [paidSubs, month]);
+  const paidDeliveries = useMemo(() => filterPaidCalendarDeliveries(deliveries, paidSubs, orders), [deliveries, paidSubs, orders]);
+  const actual = useMemo(() => paidDeliveries.filter(d => d.deliveryDate && d.deliveryDate.startsWith(`${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}`)), [paidDeliveries, month]);
   const byDate = useMemo(() => {
     const map = new Map<string, Array<{ status: string; label: string; subscription?: CustomerSubscription; delivery?: SubscriptionDelivery; number?: number }>>();
     future.forEach(e => map.set(e.date, [...(map.get(e.date) || []), { status: e.status, label: 'Upcoming', subscription: e.subscription, number: e.number }]));
@@ -141,7 +148,7 @@ export default function DeliveryCalendar() {
       <View style={styles.flex}><AppText variant="h1">Delivery Calendar</AppText><AppText variant="bodySmall" style={styles.subtitle}>Track upcoming subscription deliveries and delivery history.</AppText></View>
     </View>
 
-    {loading ? <View style={styles.center}><ActivityIndicator size="large" color={colors.green} /><AppText variant="bodySmall" style={styles.subtitle}>Loading delivery schedule…</AppText></View> : error ? <AppCard><AppText style={styles.error}>{error}</AppText><View style={styles.sheetSecondary}><Button title="Try Again" onPress={() => void load()} /></View></AppCard> : !subs.length && !deliveries.length ? <AppCard><AppText variant="h2">No subscription deliveries</AppText><AppText variant="bodySmall" style={styles.subtitle}>Your scheduled subscription deliveries will appear here.</AppText></AppCard> : <>
+    {loading ? <View style={styles.center}><ActivityIndicator size="large" color={colors.green} /><AppText variant="bodySmall" style={styles.subtitle}>Loading delivery schedule…</AppText></View> : error ? <AppCard><AppText style={styles.error}>{error}</AppText><View style={styles.sheetSecondary}><Button title="Try Again" onPress={() => void load()} /></View></AppCard> : !paidSubs.length && !paidDeliveries.length ? <AppCard><AppText variant="h2">No subscription deliveries</AppText><AppText variant="bodySmall" style={styles.subtitle}>Your scheduled subscription deliveries will appear here.</AppText></AppCard> : <>
       <AppCard style={styles.calendarCard}>
         <View style={styles.calendarHeader}><AppIconButton accessibilityLabel="Previous month" onPress={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}><MaterialCommunityIcons name="chevron-left" size={28} color={colors.greenDark} /></AppIconButton><AppText variant="h2">{monthTitle(month)}</AppText><AppIconButton accessibilityLabel="Next month" onPress={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}><MaterialCommunityIcons name="chevron-right" size={28} color={colors.greenDark} /></AppIconButton></View>
         <View style={styles.weekHeader}>{['M','T','W','T','F','S','S'].map((d, i) => <Text key={`${d}-${i}`} style={styles.weekDay}>{d}</Text>)}</View>

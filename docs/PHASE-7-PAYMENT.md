@@ -10,6 +10,11 @@ Implemented on 2026-10-05 from the Mobile Phase 6 baseline; Checkout visual alig
 
 The Mobile app must never treat callback-only success, callback timeout, or a locally cached total as the final payment truth. A final `paid`/`failed` decision always requires the server-side verification response.
 
+## Checkout amount precision clarification — 2026-10-18
+- Mobile checkout offer allocation, persisted order totals, displayed payable total, and payment-session amount comparison must use a consistent INR two-decimal rounding rule. Round monetary boundaries to paise; do not round to whole rupees or let raw floating-point artifacts create a mismatch.
+- Persisted order totals must reconcile to the checkout payable total before any payment session is opened. If they do not reconcile, fail closed and do not start Cashfree with a different amount.
+- Delivery-charge offers are not eligible when the cart contains any subscription item, including a zero-price subscription entry, per `docs/WEBSITE-MOBILE-PARITY-REMEDIATION-PLAN.md`.
+
 ## Goal
 Implement the Website-aligned Cashfree payment lifecycle for Mobile while keeping payment authority on the existing Website backend/payment APIs.
 

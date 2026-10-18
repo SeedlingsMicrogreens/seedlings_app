@@ -41,6 +41,7 @@ export type CustomerSubscription = {
   quantity?: number;
   frequency?: string;
   status?: string;
+  paymentStatus?: string;
   totalDeliveries?: number;
   deliveriesGenerated?: number;
   remainingDeliveries?: number;
@@ -169,6 +170,7 @@ export async function getCustomerSubscriptions(input: string): Promise<CustomerS
         ...(data.quantity != null ? { quantity: Math.max(1, Math.floor(num(data.quantity, 1))) } : {}),
         ...(data.frequency ? { frequency: str(data.frequency) } : {}),
         ...(data.status ? { status: str(data.status) } : {}),
+        ...(data.paymentStatus ? { paymentStatus: str(data.paymentStatus) } : {}),
         ...(total !== undefined ? { totalDeliveries: total, remainingDeliveries: Math.max(0, total - generated) } : {}),
         ...(data.deliveriesGenerated != null ? { deliveriesGenerated: generated } : {}),
         ...(data.nextDeliveryDate ? { nextDeliveryDate: str(data.nextDeliveryDate) } : {}),

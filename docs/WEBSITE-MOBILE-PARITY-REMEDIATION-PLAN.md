@@ -261,3 +261,8 @@ Website evidence: `lib/customerAlerts.ts` labels the actions `Yes, Place order` 
 ## Verification boundary
 
 Source review and regression tests confirm code paths and write ordering only. They cannot prove Firestore rules accept/reject actual writes, same-intent concurrent runtime requests converge, enquiries reach staff, or a device renders the popup correctly. Current checks pass: `npm run typecheck` (0 diagnostics), `npm run test:regression` (21 tests), `npm run check:architecture`, and `git diff --check`. The required actual Firebase persistence and Android device/emulator tests were unavailable: no adb-connected device, no emulator binary, no Mobile Firebase emulator/project config, and no Firebase variables in the current process. Payment tests/UAT were explicitly not run. Phase 1 remains blocked until approved Firebase and Android runtime checks are performed.
+
+
+### Mobile checkout precision and delivery-offer parity follow-up (2026-10-18)
+
+The source audit confirmed that `services/orders/customerOffers.ts` still applied a delivery-charge offer when a subscription entry was present, contrary to the approved parity rule in gap 5. The follow-up implements the documented rule: delivery-charge offers are evaluated only for one-time-only carts; price offers and subscription entitlements remain unchanged. Monetary allocation and persisted-total reconciliation use one INR two-decimal helper. This is a source/test change only; Cashfree sandbox and Firestore runtime verification remain separate.

@@ -14,7 +14,7 @@ import { submitHighDemandEnquiries } from '../../../services/orders/customerEnqu
 import { submitAvailabilityContactRequest, submitUnserviceablePincodeEnquiry } from '../../../services/orders/customerContactRequestService';
 import { createCashfreePaymentSession, persistCashfreePaymentAttempt, startCashfreePayment, verifyCashfreePayment } from '../../../services/payments/paymentService';
 import { clearPendingPaymentAttempt, getOrCreatePendingPaymentAttempt, getPendingPaymentAttempt, type PendingPaymentAttempt } from '../../../services/payments/paymentAttemptStore';
-import { allocateOfferSavings, calculateCheckoutPayableDeliveryCharge, calculateCheckoutPayableProductSubtotal, calculateCheckoutPayableTotal, calculateCustomerOffers, type CheckoutOfferResult, type SubscriptionDeliveryEntitlement } from '../../../services/orders/customerOffers';
+import { allocateOfferSavings, calculateCheckoutPayableDeliveryCharge, calculateCheckoutPayableProductSubtotal, calculateCheckoutPayableTotal, calculateCustomerOffers, roundCheckoutMoney, type CheckoutOfferResult, type SubscriptionDeliveryEntitlement } from '../../../services/orders/customerOffers';
 import { checkoutSavingsBreakdown, formatCheckoutAmount } from '../../../services/orders/checkoutSavings';
 import { resolvePriceDisplay, scalePriceDisplay } from '../../../services/products/priceDisplay';
 import { parseWeightGrams } from '../../../services/orders/weightUtils';
@@ -228,18 +228,18 @@ export default function Checkout() {
     }
 
     const session = await createCashfreePaymentSession(attempt.orderIds, mobile);
-    if (Math.round(session.amount) !== Math.round(attempt.total)) {
+    if (roundCheckoutMoney(session.amount) !== roundCheckoutMoney(attempt.total)) {
       throw new Error(`Payment amount mismatch. Checkout total is ${money(attempt.total)} but Cashfree received ${money(session.amount)}.`);
     }
     await persistCashfreePaymentAttempt({
       ...attempt,
       cashfreeOrderId: session.cashfreeOrderId,
-      total: session.amount || attempt.total,
+      total: roundCheckoutMoney(session.amount),
     });
 
     const paymentResult = await startCashfreePayment(session);
     if (paymentResult.status === 'paid') {
-      await completePaidAttempt(attempt.paymentAttemptId, attempt.primaryOrderNumber, session.amount || attempt.total);
+      await completePaidAttempt(attempt.paymentAttemptId, attempt.primaryOrderNumber, roundCheckoutMoney(session.amount));
       return;
     }
     if (paymentResult.status === 'failed') {

@@ -52,6 +52,12 @@ export type CustomerOfferPricingInput = {
   subscriptions?: SubscriptionDeliveryEntitlementInput[];
 };
 
+/** Canonical INR monetary rounding: two decimal places (paise). */
+export function roundCheckoutMoney(value: unknown): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.round(numeric * 100) / 100 : 0;
+}
+
 const NO_OFFERS: CheckoutOfferResult = {
   priceSavings: 0,
   oneTimePriceSavings: 0,
@@ -152,8 +158,8 @@ function hasValidDiscount(offer: CustomerOffer) {
 function savingFor(offer: CustomerOffer, base: number) {
   if (base <= 0 || !hasValidDiscount(offer)) return 0;
   const value = Number(offer.discountValue);
-  if (discountType(offer) === 'percentage') return Math.min(base, base * Math.min(100, value) / 100);
-  return Math.min(base, value);
+  if (discountType(offer) === 'percentage') return roundCheckoutMoney(Math.min(base, base * Math.min(100, value) / 100));
+  return roundCheckoutMoney(Math.min(base, value));
 }
 
 function bestOffer(offers: CustomerOffer[], saving: (offer: CustomerOffer) => number) {
@@ -171,9 +177,12 @@ export function computeCustomerOffers(offers: CustomerOffer[], input: CustomerOf
     today,
   );
   const priceCandidates = matching.filter((offer) => normalized(offer.type) === 'price' && hasValidDiscount(offer));
-  const deliveryCandidates = matching.filter((offer) => normalized(offer.type) === 'deliverycharge' && hasValidDiscount(offer));
   const oneTimeSubtotal = amount(input.oneTimeSubtotal);
   const subscriptionSubtotal = amount(input.subscriptionSubtotal);
+  // Website parity: delivery-charge offers are not eligible for carts containing subscriptions.
+  const hasSubscriptions = Boolean(input.subscriptions?.length) || subscriptionSubtotal > 0;
+  const deliveryCandidates = (hasSubscriptions ? [] : matching)
+    .filter((offer) => normalized(offer.type) === 'deliverycharge' && hasValidDiscount(offer));
   const combinedProductSubtotal = oneTimeSubtotal + subscriptionSubtotal;
   const price = bestOffer(priceCandidates, (offer) => savingFor(offer, combinedProductSubtotal));
   const eligibleDeliveryTotal = input.deliveryChargeAmounts.reduce((sum, charge) => sum + amount(charge), 0);
@@ -191,17 +200,17 @@ export function computeCustomerOffers(offers: CustomerOffer[], input: CustomerOf
       const totalPriceSaving = Math.min(combinedProductSubtotal, amount(price.offer.discountValue));
       oneTimePriceSavings = Math.min(
         oneTimeSubtotal,
-        Math.round((totalPriceSaving * oneTimeSubtotal / combinedProductSubtotal) * 100) / 100,
+        roundCheckoutMoney(totalPriceSaving * oneTimeSubtotal / combinedProductSubtotal),
       );
       subscriptionPriceSavings = Math.min(
         subscriptionSubtotal,
-        Math.round((totalPriceSaving - oneTimePriceSavings) * 100) / 100,
+        roundCheckoutMoney(totalPriceSaving - oneTimePriceSavings),
       );
     }
   }
 
-  const priceSavings = Math.min(combinedProductSubtotal, oneTimePriceSavings + subscriptionPriceSavings);
-  const deliverySavings = delivery?.saving || 0;
+  const priceSavings = roundCheckoutMoney(Math.min(combinedProductSubtotal, oneTimePriceSavings + subscriptionPriceSavings));
+  const deliverySavings = roundCheckoutMoney(delivery?.saving || 0);
   return {
     priceSavings,
     oneTimePriceSavings,
@@ -273,15 +282,15 @@ export async function calculateCustomerOffers(input: CustomerOfferPricingInput &
 
 export function allocateOfferSavings(saving: number, bases: number[]) {
   const total = bases.reduce((sum, base) => sum + amount(base), 0);
-  const totalSaving = Math.min(amount(saving), total);
+  const totalSaving = roundCheckoutMoney(Math.min(amount(saving), total));
   let allocated = 0;
   return bases.map((base, index) => {
     const baseAmount = amount(base);
     const itemSaving = totalSaving <= 0 || total <= 0
       ? 0
       : index === bases.length - 1
-        ? Math.min(baseAmount, Math.max(0, Math.round((totalSaving - allocated) * 100) / 100))
-        : Math.min(baseAmount, Math.round((totalSaving * (baseAmount / total)) * 100) / 100);
+        ? Math.min(baseAmount, Math.max(0, roundCheckoutMoney(totalSaving - allocated)))
+        : Math.min(baseAmount, roundCheckoutMoney(totalSaving * (baseAmount / total)));
     allocated += itemSaving;
     return itemSaving;
   });
@@ -292,14 +301,14 @@ export function calculateCheckoutPayableTotal(
   deliveryTotal: number,
   offers: CheckoutOfferResult,
 ) {
-  return calculateCheckoutPayableProductSubtotal(productSubtotal, offers.priceSavings)
-    + calculateCheckoutPayableDeliveryCharge(deliveryTotal, offers.deliverySavings);
+  return roundCheckoutMoney(calculateCheckoutPayableProductSubtotal(productSubtotal, offers.priceSavings)
+    + calculateCheckoutPayableDeliveryCharge(deliveryTotal, offers.deliverySavings));
 }
 
 export function calculateCheckoutPayableProductSubtotal(productSubtotal: number, appliedPriceSavings: number) {
-  return Math.max(0, amount(productSubtotal) - amount(appliedPriceSavings));
+  return roundCheckoutMoney(Math.max(0, amount(productSubtotal) - amount(appliedPriceSavings)));
 }
 
 export function calculateCheckoutPayableDeliveryCharge(deliveryTotal: number, appliedDeliverySavings: number) {
-  return Math.max(0, amount(deliveryTotal) - amount(appliedDeliverySavings));
+  return roundCheckoutMoney(Math.max(0, amount(deliveryTotal) - amount(appliedDeliverySavings)));
 }
