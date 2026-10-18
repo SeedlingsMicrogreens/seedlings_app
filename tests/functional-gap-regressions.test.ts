@@ -11,12 +11,13 @@ import { isProductSubscriptionEligible } from '../services/products/subscription
 import { getAvailableOneTimeSellingOptions, getDefaultOneTimeSellingOptionFromOptions } from '../services/products/oneTimeSellingOptions';
 import { shouldSubmitAvailabilityEnquiry } from '../services/orders/customerOrderAvailability';
 import { normalizePaymentOrderIds } from '../services/payments/paymentOrderIdUtils';
+import { beginCheckoutWithWait, CHECKOUT_IN_PROGRESS, summaryFromOrders } from '../services/orders/checkoutClaimFlow';
 import { filterPaidCalendarDeliveries, filterPaidCalendarSubscriptions, isPaidPaymentStatus } from '../services/subscriptions/calendarPaymentFilter';
 import { getCartItemCount, getUnifiedCartTotals, replaceProductCartSelectionInCart } from '../services/cart/cartService';
 import { addToCartAndNavigate, PRODUCT_DETAILS_CART_ROUTE } from '../services/cart/productDetailsCartAction';
 import { mergeCustomerProfileCacheValues } from '../services/customerProfileState';
 import { resolvePriceDisplay, scalePriceDisplay } from '../services/products/priceDisplay';
-import { allocateOfferSavings, calculateCheckoutPayableDeliveryCharge, calculateCheckoutPayableProductSubtotal, calculateCheckoutPayableTotal, computeCustomerOffers, computeSubscriptionDeliveryEntitlements, roundCheckoutMoney } from '../services/orders/customerOffers';
+import { calculateCheckoutPayableDeliveryCharge, calculateCheckoutPayableProductSubtotal, calculateCheckoutPayableTotal, computeCustomerOffers, computeSubscriptionDeliveryEntitlements, roundCheckoutMoney } from '../services/orders/customerOffers';
 import { checkoutSavingsBreakdown, formatCheckoutAmount } from '../services/orders/checkoutSavings';
 import { CUSTOMER_NOTIFICATIONS_ROUTE, notificationUnreadBadgeLabel, notificationUnreadCount, type CustomerNotification } from '../services/notifications/notificationService';
 
@@ -24,10 +25,7 @@ test('checkout money rounds consistently to INR paise', () => {
   assert.equal(roundCheckoutMoney(383.699999999), 383.7);
   assert.equal(roundCheckoutMoney(383.705), 383.71);
   assert.equal(roundCheckoutMoney(Number.NaN), 0);
-  assert.equal(calculateCheckoutPayableTotal(100.105, 0.105, {
-    priceSavings: 0, oneTimePriceSavings: 0, subscriptionPriceSavings: 0,
-    deliverySavings: 0, totalSavings: 0,
-  }), 100.22);
+  assert.equal(calculateCheckoutPayableTotal(100.105, 0.105, { priceSavings: 0, deliverySavings: 0 }), 100.22);
 });
 
 test('delivery calendar includes only paid subscriptions and their paid linked orders', () => {
@@ -87,7 +85,8 @@ test('checkout separates product reference and offer savings and combines each s
   ], {
     pincode: '123456',
     geoId: 'geo-1',
-    oneTimeSubtotal: 120,
+    oneTimeItems: [{ price: 120, quantity: 1 }],
+    subscriptionItems: [],
     deliveryChargeAmounts: [44],
   }, '2026-10-13');
 
@@ -122,7 +121,8 @@ test('checkout product subtotal reflects only the applied price offer while MRP 
   }], {
     pincode: '123456',
     geoId: 'geo-1',
-    oneTimeSubtotal: 400,
+    oneTimeItems: [{ price: 400, quantity: 1 }],
+    subscriptionItems: [],
     deliveryChargeAmounts: [],
   }, '2026-10-13');
   const reference = resolvePriceDisplay(400, 480);
@@ -135,7 +135,7 @@ test('checkout product subtotal reflects only the applied price offer while MRP 
   assert.equal(calculateCheckoutPayableTotal(400, 0, offerResult), payableSubtotal);
 });
 
-test('checkout suppresses delivery-charge offers for mixed one-time and subscription carts', () => {
+test('checkout applies delivery-charge offers per charged date for mixed carts (Website rule)', () => {
   const offerResult = computeCustomerOffers([{
     id: 'delivery-prelaunch',
     name: 'Pre Launch offer',
@@ -147,8 +147,8 @@ test('checkout suppresses delivery-charge offers for mixed one-time and subscrip
   }], {
     pincode: '123456',
     geoId: 'geo-1',
-    oneTimeSubtotal: 400,
-    subscriptionSubtotal: 300,
+    oneTimeItems: [{ price: 400, quantity: 1 }],
+    subscriptionItems: [{ price: 300, quantity: 1 }],
     deliveryChargeAmounts: [44, 44, 44, 44],
     subscriptions: [{
       frequency: 'monthly',
@@ -165,10 +165,11 @@ test('checkout suppresses delivery-charge offers for mixed one-time and subscrip
     }],
   });
 
-  assert.equal(offerResult.deliveryOffer, undefined);
-  assert.equal(offerResult.deliverySavings, 0);
-  assert.equal(calculateCheckoutPayableDeliveryCharge(176, offerResult.deliverySavings), 176);
-  assert.equal(calculateCheckoutPayableTotal(700, 176, offerResult), 876);
+  // Flat ₹60 per charged date, capped at each ₹44 charge.
+  assert.equal(offerResult.deliveryOffer?.id, 'delivery-prelaunch');
+  assert.equal(offerResult.deliverySavings, 176);
+  assert.equal(calculateCheckoutPayableDeliveryCharge(176, offerResult.deliverySavings), 0);
+  assert.equal(calculateCheckoutPayableTotal(700, 176, offerResult), 700);
   assert.deepEqual(chargeGroups, {
     oneTimeDeliveryCount: 1,
     subscriptions: [{ label: 'Monthly', deliveryCount: 3 }],
@@ -179,7 +180,8 @@ test('checkout keeps the undiscounted delivery total when no delivery offer is a
   const offerResult = computeCustomerOffers([], {
     pincode: '123456',
     geoId: 'geo-1',
-    oneTimeSubtotal: 400,
+    oneTimeItems: [{ price: 400, quantity: 1 }],
+    subscriptionItems: [],
     deliveryChargeAmounts: [44, 44, 44, 44],
     subscriptions: [{
       frequency: 'monthly',
@@ -334,44 +336,48 @@ test('applies best price and delivery offers across one-time, subscription, and 
     pincode: '123-456',
     geoId: 'geo-1',
     locationName: 'North Hub',
-    oneTimeSubtotal: 100,
-    subscriptionSubtotal: 100,
+    oneTimeItems: [{ price: 100, quantity: 1 }],
+    subscriptionItems: [{ price: 100, quantity: 1 }],
     deliveryChargeAmounts: [65, 65, 100],
   }, '2026-10-13');
 
-  assert.equal(result.priceOffer?.id, 'percent-price');
-  assert.equal(result.oneTimePriceSavings, 25);
-  assert.equal(result.subscriptionPriceSavings, 25);
-  assert.equal(result.deliveryOffer, undefined);
-  assert.equal(result.deliverySavings, 0);
-  assert.equal(calculateCheckoutPayableTotal(200, 230, result), 150 + 230);
-  assert.deepEqual(allocateOfferSavings(25, [100, 100]), [12.5, 12.5]);
+  // Website rule: a flat price offer applies per unit (₹40 + ₹40 beats 25% of each ₹100).
+  assert.equal(result.priceOffer?.id, 'flat-price');
+  assert.deepEqual(result.oneTimeItemSavings, [40]);
+  assert.deepEqual(result.subscriptionItemSavings, [40]);
+  // Delivery offers apply per charged date: flat ₹50 x 3 beats 60% (39 + 39 + 60).
+  assert.equal(result.deliveryOffer?.id, 'flat-delivery');
+  assert.equal(result.deliverySavings, 150);
+  assert.equal(calculateCheckoutPayableTotal(200, 230, result), 120 + 80);
 
   const oneTimeOnlyResult = computeCustomerOffers(offers.filter((offer) =>
     offer.id === 'flat-delivery' || offer.id === 'percent-delivery'), {
     pincode: '123456',
     geoId: 'geo-1',
     locationName: 'North Hub',
-    oneTimeSubtotal: 100,
+    oneTimeItems: [{ price: 100, quantity: 1 }],
+    subscriptionItems: [],
     deliveryChargeAmounts: [65, 65, 100],
   }, '2026-10-13');
-  assert.equal(oneTimeOnlyResult.deliveryOffer?.id, 'percent-delivery');
-  assert.equal(oneTimeOnlyResult.deliverySavings, 138);
-  assert.equal(calculateCheckoutPayableTotal(100, 230, oneTimeOnlyResult), 192);
+  assert.equal(oneTimeOnlyResult.deliveryOffer?.id, 'flat-delivery');
+  assert.equal(oneTimeOnlyResult.deliverySavings, 150);
+  assert.equal(calculateCheckoutPayableTotal(100, 230, oneTimeOnlyResult), 180);
 
   const flatDeliveryOnly = computeCustomerOffers(offers.filter((offer) => offer.id === 'flat-delivery'), {
     pincode: '123456',
     geoId: 'geo-1',
-    oneTimeSubtotal: 100,
+    oneTimeItems: [{ price: 100, quantity: 1 }],
+    subscriptionItems: [],
     deliveryChargeAmounts: [65, 65, 100],
   }, '2026-10-13');
-  assert.equal(flatDeliveryOnly.deliverySavings, 50);
-  assert.equal(calculateCheckoutPayableTotal(100, 230, flatDeliveryOnly), 280);
+  assert.equal(flatDeliveryOnly.deliverySavings, 150);
+  assert.equal(calculateCheckoutPayableTotal(100, 230, flatDeliveryOnly), 180);
 
   const mixedCartWithZeroPriceSubscription = computeCustomerOffers(offers.filter((offer) => offer.id === 'flat-delivery'), {
     pincode: '123456',
     geoId: 'geo-1',
-    oneTimeSubtotal: 100,
+    oneTimeItems: [{ price: 100, quantity: 1 }],
+    subscriptionItems: [],
     deliveryChargeAmounts: [65, 65],
     subscriptions: [{
       frequency: 'monthly',
@@ -380,8 +386,8 @@ test('applies best price and delivery offers across one-time, subscription, and 
       geoId: 'geo-1',
     }],
   }, '2026-10-13');
-  assert.equal(mixedCartWithZeroPriceSubscription.deliveryOffer, undefined);
-  assert.equal(mixedCartWithZeroPriceSubscription.deliverySavings, 0);
+  assert.equal(mixedCartWithZeroPriceSubscription.deliveryOffer?.id, 'flat-delivery');
+  assert.equal(mixedCartWithZeroPriceSubscription.deliverySavings, 100);
 });
 
 test('applies subscription bonus offers to eligible frequencies without changing checkout price offers', () => {
@@ -926,4 +932,69 @@ test('keeps the newest customer profile values in cache and avoids stale refresh
   assert.equal(noPhoto.name, 'Updated Name');
   assert.equal(noPhoto.email, 'updated@example.com');
   assert.equal(noPhoto.photoUrl, 'https://cdn.example.com/old.jpg');
+});
+
+test('checkout claim summary matches the Website order-shaped purchase summary', () => {
+  const address = { id: 'addr-1', pincode: '411041' };
+  const summary = summaryFromOrders([
+    {
+      orderType: 'one_time',
+      subscriptionId: null,
+      deliveryAddress: address,
+      scheduledDeliveryDate: '2026-10-24',
+      items: [
+        { salableProductId: 'broccoli', productId: 'broccoli', packaging: 106, quantity: 1, deliveryDate: '2026-10-24', unitPrice: 178 },
+        { productId: 'radish', packaging: 100.9, quantity: 2 },
+      ],
+    },
+    {
+      orderType: 'subscription',
+      subscriptionId: 'sub-1',
+      subscriptionPlanId: 'plan-monthly',
+      deliveryAddress: address,
+      scheduledDeliveryDate: '2026-10-31',
+      items: [{ salableProductId: 'pea', sellingOptionId: 'opt-200', packaging: 200, quantity: 1 }],
+    },
+  ]);
+
+  assert.deepEqual(summary, {
+    addressId: 'addr-1',
+    oneTime: [
+      { productId: 'broccoli', packaging: 106, quantity: 1, deliveryDate: '2026-10-24' },
+      { productId: 'radish', packaging: 100, quantity: 2, deliveryDate: '2026-10-24' },
+    ],
+    subscriptions: [
+      { productId: 'pea', planId: 'plan-monthly', sellingOptionId: 'opt-200', packaging: 200, quantity: 1, deliveryDate: '2026-10-31' },
+    ],
+  });
+});
+
+test('checkout claim begin waits while another checkout is being prepared', async () => {
+  const responses = [{ action: 'wait' as const }, { action: 'wait' as const }, { action: 'create' as const, token: 'token-1' }];
+  let calls = 0;
+  const result = await beginCheckoutWithWait(async () => responses[calls++], { addressId: 'a', oneTime: [], subscriptions: [] }, { sleep: async () => {} });
+  assert.deepEqual(result, { action: 'create', token: 'token-1' });
+  assert.equal(calls, 3);
+
+  await assert.rejects(
+    beginCheckoutWithWait(async () => ({ action: 'wait' as const }), { addressId: 'a', oneTime: [], subscriptions: [] }, { attempts: 2, sleep: async () => {} }),
+    new RegExp(CHECKOUT_IN_PROGRESS.slice(0, 30)),
+  );
+});
+
+test('flat price offer applies per unit, as the Website server verifies (Broccoli x2)', () => {
+  const offers = computeCustomerOffers([{
+    id: 'intro', name: 'Introduction', type: 'price', active: true, locationType: 'all', discountType: 'flat', discountValue: 10,
+  }, {
+    id: 'prelaunch', name: 'Pre Launch', type: 'deliveryCharge', active: true, locationType: 'all', discountType: 'flat', discountValue: 10,
+  }], {
+    pincode: '411041',
+    geoId: 'geo-1',
+    oneTimeItems: [{ price: 178, quantity: 2 }],
+    subscriptionItems: [],
+    deliveryChargeAmounts: [44],
+  }, '2026-10-18');
+  assert.deepEqual(offers.oneTimeItemSavings, [20]);
+  assert.equal(offers.deliverySavings, 10);
+  assert.equal(calculateCheckoutPayableTotal(356, 44, offers), 370);
 });

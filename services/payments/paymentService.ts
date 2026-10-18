@@ -13,6 +13,7 @@ import {
   CFSession,
 } from 'cashfree-pg-api-contract';
 import { normalizePaymentOrderIds } from './paymentOrderIdUtils';
+import { beginCheckoutWithWait, type BeginResponse, type CheckoutSummary } from '../orders/checkoutClaimFlow';
 
 export const CUSTOMER_PAYMENT_METHODS = ['UPI', 'Card', 'Wallet'] as const;
 export type CustomerPaymentMethod = (typeof CUSTOMER_PAYMENT_METHODS)[number];
@@ -133,6 +134,19 @@ async function callPaymentApi<T>(path: string, body: Record<string, unknown>): P
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/** Server checkout claim before writing orders: resume the customer's pending checkout or create with a token. */
+export function beginCheckoutClaim(mobile: string, summary: CheckoutSummary) {
+  return beginCheckoutWithWait(
+    (value) => callPaymentApi<BeginResponse>('/api/customer/checkout-claim', { action: 'begin', mobile, summary: value }),
+    summary,
+  );
+}
+
+/** Attaches newly written orders to the customer's checkout claim; only registered orders are payable. */
+export function registerCheckoutClaim(input: { mobile: string; token: string; orderIds: string[]; subscriptionIds: string[] }) {
+  return callPaymentApi<{ orderIds: string[]; subscriptionIds: string[] }>('/api/customer/checkout-claim', { action: 'register', ...input });
 }
 
 /**

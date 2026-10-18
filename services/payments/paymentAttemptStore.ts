@@ -1,5 +1,4 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { createCheckoutAttemptId } from '../orders/checkoutAttemptUtils';
 
 const STORAGE_KEY = '@seedlings/payment-attempt-v2';
 
@@ -15,17 +14,12 @@ export type PendingPaymentAttempt = {
   authUid?: string;
 };
 
-let creatingAttempt: { checkoutFingerprint: string; authUid: string; promise: Promise<PendingPaymentAttempt> } | null = null;
 let storageQueue: Promise<void> = Promise.resolve();
 
 function serializeStorageWrite<T>(operation: () => Promise<T>): Promise<T> {
   const result = storageQueue.then(operation, operation);
   storageQueue = result.then(() => undefined, () => undefined);
   return result;
-}
-
-function currentCreatingAttempt() {
-  return creatingAttempt;
 }
 
 export async function savePendingPaymentAttempt(attempt: PendingPaymentAttempt) {
@@ -39,57 +33,15 @@ export async function savePendingPaymentAttempt(attempt: PendingPaymentAttempt) 
   });
 }
 
-export async function getOrCreatePendingPaymentAttempt(checkoutFingerprint: string, authUid: string): Promise<PendingPaymentAttempt> {
-  const existing = await getPendingPaymentAttempt();
-  if (existing) {
-    if (existing.authUid && existing.authUid !== authUid) {
-      throw new Error('A payment attempt belongs to a different signed-in customer. Sign in with that account to recover it.');
-    }
-    if (!existing.orderIds.length && existing.checkoutFingerprint && existing.checkoutFingerprint !== checkoutFingerprint) {
-      throw new Error('A previous checkout may still be recovering. Restore the same cart and delivery address before retrying.');
-    }
-    return { ...existing, authUid, checkoutFingerprint: existing.checkoutFingerprint || checkoutFingerprint };
-  }
-  const activeAttempt = currentCreatingAttempt();
-  if (activeAttempt) {
-    if (activeAttempt.checkoutFingerprint !== checkoutFingerprint || activeAttempt.authUid !== authUid) {
-      throw new Error('Another checkout is already being prepared. Please wait and retry.');
-    }
-    return activeAttempt.promise;
-  }
-
-  const promise = (async () => {
-    const raced = await getPendingPaymentAttempt();
-    if (raced) {
-      if (raced.authUid && raced.authUid !== authUid) {
-        throw new Error('A payment attempt belongs to a different signed-in customer. Sign in with that account to recover it.');
-      }
-      if (!raced.orderIds.length && raced.checkoutFingerprint && raced.checkoutFingerprint !== checkoutFingerprint) {
-        throw new Error('A previous checkout may still be recovering. Restore the same cart and delivery address before retrying.');
-      }
-      return { ...raced, authUid, checkoutFingerprint: raced.checkoutFingerprint || checkoutFingerprint };
-    }
-
-    const attempt: PendingPaymentAttempt = {
-      paymentAttemptId: createCheckoutAttemptId(authUid, checkoutFingerprint),
-      orderIds: [],
-      primaryOrderId: '',
-      primaryOrderNumber: '',
-      total: 0,
-      createdAt: Date.now(),
-      checkoutFingerprint,
-      authUid,
-    };
-    await savePendingPaymentAttempt(attempt);
-    return attempt;
-  })();
-  creatingAttempt = { checkoutFingerprint, authUid, promise };
-
-  try {
-    return await promise;
-  } finally {
-    creatingAttempt = null;
-  }
+/**
+ * Records the payment attempt of a checkout the server claim just approved
+ * (created or resumed). The server has already resolved or cancelled any
+ * previous checkout, so an older local marker is replaced, not recovered.
+ */
+export async function replacePendingPaymentAttempt(attempt: PendingPaymentAttempt) {
+  await serializeStorageWrite(async () => {
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ ...attempt, createdAt: attempt.createdAt || Date.now() }));
+  });
 }
 
 export async function getPendingPaymentAttempt(): Promise<PendingPaymentAttempt | null> {

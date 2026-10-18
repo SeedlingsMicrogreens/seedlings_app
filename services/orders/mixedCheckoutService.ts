@@ -7,10 +7,13 @@ import { buildSubscriptionDeliveryDates, calculateUniqueDateCheckoutDeliveryChar
 import type { CustomerAddress } from '../customerAddresses';
 import type { CartItem, SubscriptionCartItem } from '../cart/cartService';
 import type { Product } from '../products/productService';
-import { allocateOfferSavings, calculateCheckoutPayableTotal, calculateCustomerOffers, roundCheckoutMoney } from './customerOffers';
+import { calculateCheckoutPayableTotal, calculateCustomerOffers, NO_OFFERS, roundCheckoutMoney } from './customerOffers';
+import { resolveOneTimePrice, resolveSubscriptionPrice, subscriptionDeliveriesPerTerm } from './checkoutPricing';
 import { parseWeightGrams } from './weightUtils';
 import { checkoutDocumentId, checkoutOrderNumber, checkoutSubscriptionNumber } from './checkoutAttemptUtils';
 import { getSubscriptionPlanPriceForSellingOption, getSubscriptionPlanSellingOption } from '../subscriptions/subscriptionPlanPrice';
+import { summaryFromOrders } from './checkoutClaimFlow';
+import { beginCheckoutClaim, registerCheckoutClaim } from '../payments/paymentService';
 
 const clean = (value: unknown) => typeof value === 'string' ? value.trim() : '';
 const mobileOf = (value: unknown) => normalizeIndianMobile(String(value ?? ''));
@@ -23,7 +26,6 @@ export type MixedCheckoutInput = {
   mobile: string;
   addressId: string;
   deliverySlot: string;
-  paymentAttemptId?: string;
   checkoutFingerprint: string;
   paymentMethod?: string;
   oneTimeItems: CartItem[];
@@ -44,6 +46,8 @@ export type MixedCheckoutResult = {
   primaryOrderNumber: string;
   paymentAttemptId: string;
   cashfreeOrderId?: string;
+  /** The server matched this purchase to the customer's existing pending orders. */
+  resumed?: boolean;
 };
 
 type CheckoutOrderRecord = { id: string; data: Record<string, unknown> };
@@ -129,6 +133,18 @@ async function recoverCheckoutAttempt(
   return resultFromOrders(paymentAttemptId, records);
 }
 
+/** Loads the pending orders the server resumed for this same purchase (ownership is checked before payment). */
+async function resumeCheckoutOrders(orderIds: string[]): Promise<MixedCheckoutResult> {
+  if (!orderIds.length) throw new Error('No pending order was found for this checkout.');
+  const snapshots = await Promise.all(orderIds.map((id) => getDoc(doc(db, 'orders', id))));
+  if (snapshots.some((snapshot) => !snapshot.exists())) {
+    throw new Error('A pending order for this checkout could not be found. Please try again.');
+  }
+  const records = snapshots.map((snapshot) => ({ id: snapshot.id, data: (snapshot.data() || {}) as Record<string, unknown> }));
+  const paymentAttemptId = clean(records[0].data.paymentAttemptId) || `resume-${records[0].id}`;
+  return { ...resultFromOrders(paymentAttemptId, records), resumed: true };
+}
+
 function formatWeightLabel(grams: number) {
   return grams >= 1000 && grams % 1000 === 0 ? `${grams / 1000}kg box` : `${grams}g box`;
 }
@@ -156,9 +172,9 @@ function productOrderItem(product: Record<string, unknown> & { id: string }, ite
     return sum + Math.max(0, number(component.quantityGrams));
   }, 0);
   const quantity = Math.max(1, Math.floor(number(item.quantity, 1)));
-  const weightGrams = Math.max(0, packagingGrams * quantity);
-  const price = number(selectedOption?.price, number(item.price, number(product.sellingPrice)));
-  const mrp = number(selectedOption?.mrp, number(item.mrp, number(product.mrp, price)));
+  // Same price lookup as the Website checkout and server payment verification.
+  const { price, mrp, packaging } = resolveOneTimePrice(product, packagingGrams, item.name);
+  const weightGrams = Math.max(0, packaging * quantity);
   return {
     salableProductId: product.id,
     salableProductSku: clean(product.sku),
@@ -167,8 +183,8 @@ function productOrderItem(product: Record<string, unknown> & { id: string }, ite
     productName: clean(product.name) || item.name,
     productSlug: clean(product.slug),
     sellingOptionId: clean(selectedOption?.id) || clean(item.sellingOptionId),
-    sellingOptionLabel: item.sellingOptionLabel || formatWeightLabel(packagingGrams),
-    packaging: packagingGrams,
+    sellingOptionLabel: item.sellingOptionLabel || formatWeightLabel(packaging),
+    packaging,
     weightGrams,
     quantity,
     mrp: roundCheckoutMoney(mrp),
@@ -196,21 +212,15 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
   if (!authUid) throw new Error('Your login session expired. Please sign in again.');
   if (mobile.length !== 10) throw new Error('Invalid customer mobile number.');
 
-  const paymentAttemptId = clean(input.paymentAttemptId) || `pay-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  // Every new checkout gets fresh document IDs. Repeats of the same purchase are
+  // recognised by the server checkout claim (resume), not by reusing IDs: a
+  // replaced checkout's orders are cancelled and must never be written again.
+  const paymentAttemptId = `pay-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const expectedOneTimeOrders = groupOneTimeOrderItemsByDeliveryDate(
     input.oneTimeItems.map((item) => ({ deliveryDate: clean(item.deliveryDate) || nextWeekSaturday() })),
     nextWeekSaturday(),
   ).length;
   const expectedOrderCount = expectedOneTimeOrders + input.subscriptionItems.length;
-  const existingAttempt = await recoverCheckoutAttempt(
-    authUid,
-    mobile,
-    paymentAttemptId,
-    input.checkoutFingerprint,
-    expectedOrderCount,
-    input.subscriptionItems.length,
-  );
-  if (existingAttempt) return existingAttempt;
 
   if (!clean(input.addressId)) throw new Error('Delivery address is required.');
   if (!clean(input.deliverySlot)) throw new Error('Delivery slot/date is required.');
@@ -236,9 +246,11 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
   const targetDate = nextWeekSaturday();
 
   const resolvedOneTimeDates = input.oneTimeItems.map((item) => clean(item.deliveryDate) || targetDate);
-  const resolvedSubscriptionDates = input.subscriptionItems.flatMap((item) =>
-    buildSubscriptionDeliveryDates(clean(item.deliveryDate) || clean(item.startDate) || targetDate, Number(item.deliveriesPerTerm) || 1),
-  );
+  const resolvedSubscriptionDates = input.subscriptionItems.flatMap((item) => {
+    const plan = planById.get(item.planId);
+    if (!plan) throw new Error(`Subscription plan "${item.planName}" is no longer active.`);
+    return buildSubscriptionDeliveryDates(clean(item.deliveryDate) || clean(item.startDate) || targetDate, subscriptionDeliveriesPerTerm(plan));
+  });
   const deliveryCharges = await calculateUniqueDateCheckoutDeliveryCharges({
     pincode: String(address.pincode ?? ''),
     oneTimeDates: resolvedOneTimeDates,
@@ -327,7 +339,7 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
     const weight = packaging * quantity;
     if (!Number.isFinite(weight) || weight <= 0) throw new Error(`Product "${clean(product.name) || item.name}" has an invalid pack quantity.`);
 
-    const deliveries = Math.max(1, number(plan.deliveriesPerTerm, frequency === 'monthly' ? 4 : frequency === 'quarterly' ? 12 : 1));
+    const deliveries = subscriptionDeliveriesPerTerm(plan);
     const first = clean(item.deliveryDate) || clean(item.startDate) || targetDate;
     const subscriptionDates = buildSubscriptionDeliveryDates(first, deliveries);
     const endDate = subscriptionDates[subscriptionDates.length - 1] || first;
@@ -341,6 +353,11 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
     const charge = deliveryChargeForDate.get(firstSubscriptionDate);
     const label = item.sellingOptionLabel || formatWeightLabel(packaging);
     const sellingOptionId = clean(sellingOption?.sellingOptionId) || clean(sellingOption?.id) || clean(item.sellingOptionId);
+    // The Website verifies the plan price from these exact fields before payment.
+    const verifiedPrice = resolveSubscriptionPrice(product, plan, { sellingOptionId, packaging, planName: item.planName, displayName: item.name });
+    if (!Number.isFinite(price) || roundCheckoutMoney(verifiedPrice.price) !== roundCheckoutMoney(price) || verifiedPrice.packaging !== packaging) {
+      throw new Error(`The subscription price for "${clean(product.name) || item.name}" has changed. Please return to Cart and try again.`);
+    }
     const subscriptionRef = doc(db, 'subscriptions', checkoutDocumentId(paymentAttemptId, 'subscription', String(subscriptionIndex)));
     const orderRef = doc(db, 'orders', checkoutDocumentId(paymentAttemptId, 'subscription_order', String(subscriptionIndex)));
     const subscriptionNumber = checkoutSubscriptionNumber(paymentAttemptId, subscriptionIndex);
@@ -449,41 +466,39 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
   if (availabilityResults.some((result) => result.hasShortage)) throw new Error('HARVEST_SHORTAGE_CONFIRMATION_REQUIRED');
 
   const geo = deliveryCharges.charges[0];
+  // Offers are earned per order line with the shared Website rule (checkoutPricing.ts).
   const offerResult = (input.oneTimeItems.length || input.subscriptionItems.length)
     ? await calculateCustomerOffers({
         pincode: String(address.pincode ?? ''),
         geoId: geo?.sourceId ?? '',
         locationName: geo?.sourceName ?? '',
-        oneTimeSubtotal: oneSubtotal,
-        subscriptionSubtotal: subscriptionWrites.reduce((sum, item) => sum + number(item.order.subtotal), 0),
+        oneTimeItems: oneOrderItems.map((item) => ({ price: number(item.unitPrice), quantity: number(item.quantity) })),
+        subscriptionItems: subscriptionWrites.map((write) => {
+          const item = ((write.order.items as Array<Record<string, unknown>>) || [])[0] || {};
+          return { price: number(item.unitPrice), quantity: number(item.quantity) };
+        }),
         deliveryChargeAmounts: deliveryCharges.charges.map((charge) => charge.charge),
         subscriptions: input.subscriptionItems.map((item) => {
           const plan = planById.get(item.planId) || {};
-          const frequency = clean(plan.frequency).toLowerCase();
           return {
-            frequency,
-            regularDeliveries: number(plan.deliveriesPerTerm, frequency === 'monthly' ? 4 : frequency === 'quarterly' ? 12 : 1),
+            frequency: clean(plan.frequency).toLowerCase(),
+            regularDeliveries: subscriptionDeliveriesPerTerm(plan),
             pincode: String(address.pincode ?? ''),
             geoId: geo?.sourceId ?? '',
             locationName: geo?.sourceName ?? '',
           };
         }),
       })
-    : {
-        priceSavings: 0,
-        oneTimePriceSavings: 0,
-        subscriptionPriceSavings: 0,
-        deliverySavings: 0,
-        totalSavings: 0,
-        subscriptionEntitlements: [],
-      };
+    : { ...NO_OFFERS, subscriptionEntitlements: [] };
   const subscriptionSubtotal = subscriptionWrites.reduce((sum, item) => sum + number(item.order.subtotal), 0);
   const expectedCheckoutTotal = roundCheckoutMoney(calculateCheckoutPayableTotal(
     oneSubtotal + subscriptionSubtotal,
     deliveryCharges.total,
     offerResult,
   ));
-  let remainingDeliveryOfferSavings = Math.min(offerResult.deliverySavings, deliveryCharges.total);
+  // Same allocation as the Website's allocateCheckoutTotals: delivery-offer savings go to
+  // one-time orders by date first, then subscriptions; price savings stay with their lines.
+  let remainingDeliveryOfferSavings = roundCheckoutMoney(Math.min(Math.max(0, offerResult.deliverySavings), deliveryCharges.total));
   const allocateDeliveryOfferSaving = (deliveryFee: number) => {
     const saving = roundCheckoutMoney(Math.min(Math.max(0, deliveryFee), remainingDeliveryOfferSavings));
     remainingDeliveryOfferSavings = roundCheckoutMoney(Math.max(0, remainingDeliveryOfferSavings - saving));
@@ -498,11 +513,8 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
       allocateDeliveryOfferSaving(oneTimeDeliveryChargeByDate.get(date) ?? 0),
     );
   }
-  const oneTimeOfferSavings = Math.min(oneSubtotal, offerResult.oneTimePriceSavings);
-  const subscriptionPriceAllocations = allocateOfferSavings(
-    offerResult.subscriptionPriceSavings,
-    subscriptionWrites.map((write) => number(write.order.subtotal)),
-  );
+  const subscriptionPriceAllocations = subscriptionWrites.map((write, index) =>
+    roundCheckoutMoney(Math.min(number(write.order.subtotal), Math.max(0, number(offerResult.subscriptionItemSavings[index])))));
   for (const [index, write] of subscriptionWrites.entries()) {
     const entitlement = offerResult.subscriptionEntitlements[index];
     if (!entitlement) throw new Error('Subscription delivery entitlement could not be calculated.');
@@ -520,10 +532,14 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
     write.order.subscriptionOfferId = entitlement.offer?.id || '';
     write.order.subscriptionOfferName = String(entitlement.offer?.name ?? '');
   }
-  const oneTimePriceAllocations = allocateOfferSavings(
-    oneTimeOfferSavings,
-    oneOrderGroups.map(([, items]) => items.reduce((sum, item) => sum + number(item.lineTotal), 0)),
-  );
+  const oneTimeSavingsByDate = new Map<string, number>();
+  oneOrderItems.forEach((item, index) => {
+    oneTimeSavingsByDate.set(item.deliveryDate, (oneTimeSavingsByDate.get(item.deliveryDate) || 0) + number(offerResult.oneTimeItemSavings[index]));
+  });
+  const oneTimePriceAllocations = oneOrderGroups.map(([date, items]) => roundCheckoutMoney(Math.min(
+    items.reduce((sum, item) => sum + number(item.lineTotal), 0),
+    Math.max(0, oneTimeSavingsByDate.get(date) || 0),
+  )));
   for (let index = 0; index < subscriptionWrites.length; index += 1) {
     const write = subscriptionWrites[index];
     const subtotal = number(write.order.subtotal);
@@ -606,6 +622,20 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
     throw new Error('Checkout order totals do not match the displayed product and delivery total. Please return to Cart and try again.');
   }
 
+  // One pending checkout per customer (server-enforced, same as the Website):
+  // the same purchase resumes its existing orders; a changed cart has the old
+  // unpaid orders cancelled server-side before these records are written.
+  const claim = await beginCheckoutClaim(mobile, summaryFromOrders([
+    ...oneOrderWrites.map((item) => item.order),
+    ...subscriptionWrites.map((item) => item.order),
+  ]));
+  if (claim.action === 'resume') return resumeCheckoutOrders(claim.resume.orderIds);
+  for (const item of oneOrderWrites) item.order.checkoutClaimToken = claim.token;
+  for (const item of subscriptionWrites) {
+    item.subscription.checkoutClaimToken = claim.token;
+    item.order.checkoutClaimToken = claim.token;
+  }
+
   const documents = [
     ...oneOrderWrites.map((item) => ({ ref: item.ref, data: item.order })),
     ...subscriptionWrites.flatMap((item) => [
@@ -619,7 +649,8 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
   try {
     await batch.commit();
   } catch (writeError) {
-    const recovered = await recoverCheckoutAttempt(
+    // The write may have reached Firestore before the connection failed.
+    const written = await recoverCheckoutAttempt(
       authUid,
       mobile,
       paymentAttemptId,
@@ -627,9 +658,16 @@ export async function createCustomerMixedCheckout(input: MixedCheckoutInput): Pr
       expectedOrderCount,
       input.subscriptionItems.length,
     );
-    if (recovered) return recovered;
-    throw writeError;
+    if (!written) throw writeError;
   }
+
+  // Only registered records are payable; an unregistered token is cancelled by the server.
+  await registerCheckoutClaim({
+    mobile,
+    token: claim.token,
+    orderIds: [...oneOrderWrites.map((item) => item.ref.id), ...subscriptionWrites.map((item) => item.orderRef.id)],
+    subscriptionIds: subscriptionWrites.map((item) => item.subscriptionRef.id),
+  });
 
   const recovered = await recoverCheckoutAttempt(
     authUid,

@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "test:regression": "EXPO_PUBLIC_FIREBASE_API_KEY=test-api-key EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN=demo.example.com EXPO_PUBLIC_FIREBASE_PROJECT_ID=demo-project EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET=demo-project.appspot.com EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=123456789 EXPO_PUBLIC_FIREBASE_APP_ID=1:123456789:web:deadbeef EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID=G-TEST tsx --test tests/functional-gap-regressions.test.ts",
     "check:architecture": "node scripts/check-mobile-api-boundary.cjs",
-    "generate:image-map": "node scripts/generate-image-map.cjs"
+    "generate:image-map": "node scripts/generate-image-map.cjs",
+    "check:pricing-parity": "node scripts/check-pricing-parity.mjs"
   },
   "dependencies": {
     "@expo/ui": "~57.0.21",

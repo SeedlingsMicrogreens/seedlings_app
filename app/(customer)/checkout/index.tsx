@@ -13,8 +13,8 @@ import { assertPaymentAttemptOwnership, createCustomerMixedCheckout } from '../.
 import { submitHighDemandEnquiries } from '../../../services/orders/customerEnquiryService';
 import { submitAvailabilityContactRequest, submitUnserviceablePincodeEnquiry } from '../../../services/orders/customerContactRequestService';
 import { createCashfreePaymentSession, persistCashfreePaymentAttempt, startCashfreePayment, verifyCashfreePayment } from '../../../services/payments/paymentService';
-import { clearPendingPaymentAttempt, getOrCreatePendingPaymentAttempt, getPendingPaymentAttempt, type PendingPaymentAttempt } from '../../../services/payments/paymentAttemptStore';
-import { allocateOfferSavings, calculateCheckoutPayableDeliveryCharge, calculateCheckoutPayableProductSubtotal, calculateCheckoutPayableTotal, calculateCustomerOffers, roundCheckoutMoney, type CheckoutOfferResult, type SubscriptionDeliveryEntitlement } from '../../../services/orders/customerOffers';
+import { clearPendingPaymentAttempt, replacePendingPaymentAttempt, type PendingPaymentAttempt } from '../../../services/payments/paymentAttemptStore';
+import { calculateCheckoutPayableDeliveryCharge, calculateCheckoutPayableProductSubtotal, calculateCheckoutPayableTotal, calculateCustomerOffers, NO_OFFERS, roundCheckoutMoney, type CheckoutOfferResult, type SubscriptionDeliveryEntitlement } from '../../../services/orders/customerOffers';
 import { checkoutSavingsBreakdown, formatCheckoutAmount } from '../../../services/orders/checkoutSavings';
 import { resolvePriceDisplay, scalePriceDisplay } from '../../../services/products/priceDisplay';
 import { parseWeightGrams } from '../../../services/orders/weightUtils';
@@ -92,7 +92,7 @@ export default function Checkout() {
   const [deliveryCharges, setDeliveryCharges] = useState<UniqueDateCheckoutDeliveryCharges | null>(null);
   const [chargeLoading, setChargeLoading] = useState(true);
   const [checkoutLines, setCheckoutLines] = useState<CheckoutLine[]>([]);
-  const [offerResult, setOfferResult] = useState<CheckoutOfferResult>({ priceSavings: 0, oneTimePriceSavings: 0, subscriptionPriceSavings: 0, deliverySavings: 0, totalSavings: 0 });
+  const [offerResult, setOfferResult] = useState<CheckoutOfferResult>(NO_OFFERS);
   const [subscriptionEntitlements, setSubscriptionEntitlements] = useState<SubscriptionDeliveryEntitlement[]>([]);
   const paymentInFlight = useRef(false);
   const pincodeEnquiryInFlight = useRef(false);
@@ -135,7 +135,7 @@ export default function Checkout() {
     const pincode = String(selected?.pincode ?? '').replace(/\D/g, '');
     setChargeLoading(true);
     setDeliveryCharges(null);
-    setOfferResult({ priceSavings: 0, oneTimePriceSavings: 0, subscriptionPriceSavings: 0, deliverySavings: 0, totalSavings: 0 });
+    setOfferResult(NO_OFFERS);
     setSubscriptionEntitlements([]);
     setUnserviceablePincode('');
     setPincodeEnquiryError('');
@@ -153,16 +153,14 @@ export default function Checkout() {
           buildSubscriptionDeliveryDates(item.deliveryDate || item.startDate || nextWeekSaturday(), regularDeliveriesFor(item)),
         ),
       });
-      const oneTimeSubtotal = cart.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 0), 0);
-      const subscriptionSubtotal = subscriptionCart.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 0), 0);
       const geoId = result.charges[0]?.sourceId ?? '';
       const locationName = result.charges[0]?.sourceName ?? '';
       const offers = await calculateCustomerOffers({
         pincode,
         geoId,
         locationName,
-        oneTimeSubtotal,
-        subscriptionSubtotal,
+        oneTimeItems: cart.map((item) => ({ price: Number(item.price || 0), quantity: Number(item.quantity || 0) })),
+        subscriptionItems: subscriptionCart.map((item) => ({ price: Number(item.price || 0), quantity: Number(item.quantity || 0) })),
         deliveryChargeAmounts: result.charges.map((charge) => charge.charge),
         subscriptions: subscriptionCart.map((item) => ({
           frequency: item.frequency ?? '',
@@ -309,36 +307,8 @@ export default function Checkout() {
 
     setValidating(true);
     try {
-      const pendingAttempt = await getPendingPaymentAttempt();
-      if (pendingAttempt?.orderIds.length) {
-        if (pendingAttempt.authUid && pendingAttempt.authUid !== auth.currentUser?.uid) {
-          throw new Error('A payment attempt belongs to a different signed-in customer. Sign in with that account to recover it.');
-        }
-        const currentFingerprint = buildCheckoutFingerprint({
-          addressId: selectedAddress.id,
-          deliverySlot: deliverySlotForCart(cart, subscriptionCart),
-          oneTimeItems: cart,
-          subscriptionItems: subscriptionCart,
-        });
-        if (pendingAttempt.checkoutFingerprint !== currentFingerprint) {
-          const attemptDescription = pendingAttempt.primaryOrderNumber || pendingAttempt.primaryOrderId || 'Previous order';
-          const cartMismatch = pendingAttempt.checkoutFingerprint
-            ? 'belongs to a different cart or delivery selection'
-            : 'cannot be matched to your current cart';
-          const resumePreviousAttempt = await new Promise<boolean>((resolve) => Alert.alert(
-            'Previous checkout needs attention',
-            `${attemptDescription} for ${money(pendingAttempt.total)} ${cartMismatch}. Resume that previous payment instead of paying for your current cart?`,
-            [
-              { text: 'Not now', style: 'cancel', onPress: () => resolve(false) },
-              { text: 'Resume previous payment', onPress: () => resolve(true) },
-            ],
-            { cancelable: false },
-          ));
-          if (!resumePreviousAttempt) return;
-        }
-        await continuePaymentAttempt(pendingAttempt);
-        return;
-      }
+      // A previous unpaid checkout is resolved by the server checkout claim during
+      // order creation (same cart resumes it; a changed cart replaces it).
 
       // Re-read current products before allowing the customer to continue.
       // This is a checkout validation only; it does not reserve inventory.
@@ -520,16 +490,13 @@ export default function Checkout() {
         return;
       }
 
-      // The durable attempt ID is shared by concurrent screens and reused after
-      // restart. Order creation uses deterministic document IDs for this attempt.
-      const activeAttempt = await getOrCreatePendingPaymentAttempt(checkoutFingerprint, authUid);
-      await persistCashfreePaymentAttempt({ ...activeAttempt, total: checkoutTotal });
-
+      // The server checkout claim decides whether these are new orders or the
+      // customer's existing pending orders for the same purchase; a changed cart
+      // has the previous unpaid orders cancelled before new ones are written.
       const paymentAttempt = await createCustomerMixedCheckout({
         mobile,
         addressId: selectedAddress.id,
         deliverySlot,
-        paymentAttemptId: activeAttempt.paymentAttemptId,
         checkoutFingerprint,
         paymentMethod: 'online',
         oneTimeItems: useAppStore.getState().cart,
@@ -548,11 +515,13 @@ export default function Checkout() {
         primaryOrderId: paymentAttempt.primaryOrderId,
         primaryOrderNumber: paymentAttempt.primaryOrderNumber,
         total: paymentAttempt.total,
-        createdAt: activeAttempt.createdAt,
-        ...(activeAttempt.checkoutFingerprint ? { checkoutFingerprint: activeAttempt.checkoutFingerprint } : {}),
-        ...(activeAttempt.authUid ? { authUid: activeAttempt.authUid } : {}),
+        createdAt: Date.now(),
+        // Resumed orders may come from an earlier session or the Website; their
+        // ownership is checked by UID and customer only.
+        ...(paymentAttempt.resumed ? {} : { checkoutFingerprint }),
+        authUid,
       };
-      await persistCashfreePaymentAttempt(paymentRecord);
+      await replacePendingPaymentAttempt(paymentRecord);
       await continuePaymentAttempt(paymentRecord);
     } catch (error) {
       setValidationError(error instanceof Error ? error.message : 'Unable to validate checkout. Please try again.');
@@ -589,11 +558,8 @@ export default function Checkout() {
     const itemPrice = item.price * item.quantity;
     const peerLines = line.kind === 'one-time' ? oneTimeLines : subscriptionLines;
     const peerIndex = peerLines.findIndex((peer) => peer.key === line.key);
-    const offerSaving = line.kind === 'one-time' ? offerResult.oneTimePriceSavings : offerResult.subscriptionPriceSavings;
-    const allocatedOfferSaving = allocateOfferSavings(
-      offerSaving,
-      peerLines.map((peer) => peer.item.price * peer.item.quantity),
-    )[peerIndex] ?? 0;
+    // Offers are earned per cart line (shared checkoutPricing rule), in cart order.
+    const allocatedOfferSaving = (line.kind === 'one-time' ? offerResult.oneTimeItemSavings : offerResult.subscriptionItemSavings)[peerIndex] ?? 0;
     const finalItemPrice = Math.max(0, itemPrice - allocatedOfferSaving);
     const firstDate = line.dates[0] || nextWeekSaturday();
     const subscriptionIndex = line.kind === 'subscription'
